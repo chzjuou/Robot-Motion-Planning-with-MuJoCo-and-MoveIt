@@ -1,6 +1,6 @@
-# Ubuntu 22.04.5 + ROS 2 Humble + MoveIt + Panda + MuJoCo
+# Robot Motion Planning with MuJoCo and MoveIt
 
-This is the Humble-specific version.
+Requirement: Ubuntu 22.04.5 + ROS 2 Humble + MoveIt + Panda + MuJoCo
 
 Architecture:
 
