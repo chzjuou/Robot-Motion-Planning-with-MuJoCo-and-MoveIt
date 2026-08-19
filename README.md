@@ -112,7 +112,7 @@ source install/setup.bash
 ---
 
 ## 4. Implementation
-### Launch Terminal 1: MuJoCo bridge
+### Launch Terminal 1: MuJoCo Bridge
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -243,7 +243,7 @@ If these parameters do not appear, do NOT run the pick-place program.
 
 ---
 
-### Launch Terminal 3: Pick and place
+### Launch Terminal 3: Pick and Place
 
 ```bash
 source /opt/ros/humble/setup.bash
