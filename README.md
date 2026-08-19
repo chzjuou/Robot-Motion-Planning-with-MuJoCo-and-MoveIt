@@ -122,7 +122,7 @@ ros2 launch mujoco_moveit_bridge bridge.launch.py \
   panda_xml:=/home/$USER/mujoco_pj/panda.xml
 ```
 
-Check:
+Open another terminal and check:
 
 ```bash
 ros2 topic echo /joint_states --once
@@ -198,7 +198,7 @@ MoveIt reads the real joint state from the MuJoCo bridge and sends execution tra
 /panda_arm_controller/follow_joint_trajectory
 ```
 
-Check both pipelines:
+Open another terminal and check:
 
 ```bash
 ros2 param get /move_group planning_pipelines
