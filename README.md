@@ -111,38 +111,6 @@ source install/setup.bash
 
 ---
 
-## 4. Your existing MuJoCo files
-
-Example:
-
-```text
-~/mujoco_pj/
-├── my_scene.xml
-├── panda.xml
-└── assets
-```
-
-The bridge preserves the original two-Panda assembly:
-
-```python
-frame1 = [-0.25, 0.45, 0.8]
-frame2 = [ 0.25, 0.45, 0.8]
-
-quat = [0.7071, 0, 0, -0.7071]
-```
-
-The controlled robot is `panda2`.
-
-ROS joint mapping:
-
-```text
-panda_joint1 <-> panda2_joint1
-...
-panda_joint7 <-> panda2_joint7
-```
-
----
-
 # Terminal 1: MuJoCo bridge
 
 ```bash
