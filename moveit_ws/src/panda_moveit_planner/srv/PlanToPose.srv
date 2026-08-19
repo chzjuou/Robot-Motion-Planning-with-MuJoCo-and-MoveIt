@@ -1,0 +1,8 @@
+geometry_msgs/PoseStamped target
+bool linear
+bool execute
+float64 velocity_scale
+float64 acceleration_scale
+---
+bool success
+string message
