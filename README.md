@@ -111,7 +111,7 @@ source install/setup.bash
 
 ---
 
-# Terminal 1: MuJoCo bridge
+## Launch Terminal 1: MuJoCo bridge
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -173,7 +173,7 @@ ros2 service call /mujoco/wait_until_stopped std_srvs/srv/Trigger "{}"
 
 ---
 
-# Terminal 2: MoveIt 2 + RViz
+## Launch Terminal 2: MoveIt 2 + RViz
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -242,7 +242,7 @@ If these parameters do not appear, do NOT run the pick-place program.
 
 ---
 
-# Terminal 3: Pick and place
+## Launch Terminal 3: Pick and place
 
 ```bash
 source /opt/ros/humble/setup.bash
