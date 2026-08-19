@@ -44,7 +44,7 @@ Use:
 ```text
 Ubuntu 22.04.5 LTS
 ROS 2 Humble
-MoveIt 2 Humble
+Python 3.10
 ```
 
 Do not install ROS 2 Jazzy on this machine.
