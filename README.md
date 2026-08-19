@@ -84,7 +84,7 @@ If the second command fails, do not create a separate conda environment yet. The
 
 Copy /moveit_ws and /mujoco_pj to the home directory.
 
-There are four packages in the ROS workspace
+There are four packages in the ROS workspace:
 
 ```text
 ~/moveit_ws/
