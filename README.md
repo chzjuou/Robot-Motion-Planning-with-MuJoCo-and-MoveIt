@@ -1,6 +1,6 @@
 # Robot Motion Planning with MuJoCo and MoveIt
 
-Requirement: Ubuntu 22.04.5 + ROS 2 Humble + MoveIt + Panda + MuJoCo
+Requirement: Ubuntu 22.04 + ROS 2 Humble + MoveIt + Panda + MuJoCo
 
 Architecture:
 
@@ -42,7 +42,7 @@ MuJoCo provides:
 Use:
 
 ```text
-Ubuntu 22.04.5 LTS
+Ubuntu 22.04 LTS
 ROS 2 Humble
 Python 3.10
 ```
