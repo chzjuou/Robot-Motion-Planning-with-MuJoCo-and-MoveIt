@@ -6,7 +6,7 @@ Task 1 demonstrates robot motion planning and execution for WRS parts assembly u
 
 Tested/targeted software environment described by the original project:
 
-- Ubuntu 22.04.5 LTS
+- Ubuntu 22.04 LTS
 - ROS 2 Humble
 - MoveIt 2 Humble
 - Python with both `rclpy` and `mujoco` available
@@ -72,7 +72,9 @@ source "$WS/install/setup.bash"
 Start the MuJoCo simulation and its ROS 2 trajectory-execution bridge:
 
 ```bash
-ros2 launch mujoco_moveit_bridge bridge.launch.py
+ros2 launch mujoco_moveit_bridge bridge.launch.py \
+  scene_xml:=/home/$USER/mujoco_pj/wrs.xml \
+  panda_xml:=/home/$USER/mujoco_pj/panda.xml
 ```
 
 The bridge loads the WRS scene and Panda robot XML files. **Wait until the bridge is running before starting the next component.** It provides `/joint_states`, the trajectory action `/panda_arm_controller/follow_joint_trajectory`, and MuJoCo gripper and motion-state services.
