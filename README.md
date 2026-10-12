@@ -1,312 +1,153 @@
-# Ubuntu 22.04.5 + ROS 2 Humble + MoveIt + Panda + MuJoCo
+# Task 1 — WRS Parts Assembly with MuJoCo and MoveIt
 
-This is the Humble-specific version.
+Task 1 demonstrates robot motion planning and execution for WRS parts assembly using **ROS 2 Humble**, **MoveIt 2**, and **MuJoCo**. The task is divided into three subtasks: **L-shaped part assembly**, **motor assembly**, and **pulley assembly**.
 
-Architecture:
+## 1. Environment and project structure
 
-```text
-MoveIt 2 Humble
-  ├─ OMPL / RRTConnect        free-space motion
-  └─ Pilz LIN                 exact Cartesian straight-line motion
-              |
-              | control_msgs/action/FollowJointTrajectory
-              v
-mujoco_moveit_bridge
-              |
-              | panda_joint1..7 -> panda2_joint1..7
-              v
-MuJoCo position actuators
-```
+Tested/targeted software environment described by the original project:
 
-MuJoCo publishes:
+- Ubuntu 22.04.5 LTS
+- ROS 2 Humble
+- MoveIt 2 Humble
+- Python with both `rclpy` and `mujoco` available
+
+Keep the repository's relative directory structure:
 
 ```text
-/joint_states
-/mujoco/fingertip_center
+<repository-root>/
+├── README.md
+├── install_humble.sh
+├── mujoco_pj/
+│   ├── wrs.xml
+│   ├── panda.xml
+│   └── assets/ ...
+└── moveit_ws/
+    └── src/
+        ├── mujoco_moveit_bridge/
+        ├── panda_mujoco_moveit_config/
+        ├── panda_moveit_planner/
+        └── panda_moveit_task/
+            ├── run_tasks_all.sh
+            ├── run_subtask_1.sh
+            ├── run_subtask_2.sh
+            ├── run_subtask_3.sh
+            └── config/
 ```
 
-MuJoCo provides:
+The Bridge and Screw modules include XML path-resolution logic for the repository layout, so the commands below do not require hard-coded paths to `wrs.xml` or `panda.xml`.
 
-```text
-/panda_arm_controller/follow_joint_trajectory
-/mujoco/gripper
-/mujoco/wait_until_stopped
-```
+## 2. Rebuild the ROS 2 workspace
 
-`/mujoco/wait_until_stopped` is important for ROS 2 Humble's Pilz `LIN`: Pilz requires a zero-velocity start state.
-
----
-
-## 1. Platform
-
-Use:
-
-```text
-Ubuntu 22.04.5 LTS
-ROS 2 Humble
-MoveIt 2 Humble
-```
-
-Do not install ROS 2 Jazzy on this machine.
-
----
-
-## 2. Install
-
-From this workspace root:
+Open a terminal at the **repository root**, then run:
 
 ```bash
-chmod +x install_humble.sh
-./install_humble.sh
-```
-
-Then install MuJoCo into a Python interpreter that can also import ROS 2 `rclpy`.
-
-First check:
-
-```bash
+cd /path/to/Robot-Motion-Planning-with-MuJoCo-and-MoveIt
 source /opt/ros/humble/setup.bash
-python3 -c "import rclpy; print('rclpy OK')"
-```
+cd moveit_ws
 
-Then install/test MuJoCo:
-
-```bash
-python3 -m pip install --user mujoco
-python3 -c "import rclpy, mujoco; print('rclpy OK, MuJoCo', mujoco.__version__)"
-```
-
-If the second command fails, do not create a separate conda environment yet. The bridge process must be able to import both `rclpy` and `mujoco`.
-
----
-
-## 3. Workspace
-
-Copy /moveit_ws and /mujoco_pj to the home directory.
-
-There are four packages in the ROS workspace
-
-```text
-~/moveit_ws/
-└── src/
-    ├── mujoco_moveit_bridge
-    ├── panda_mujoco_moveit_config
-    ├── panda_moveit_planner
-    └── panda_moveit_task
-```
-
-Build:
-
-```bash
-cd ~/moveit_ws
-source /opt/ros/humble/setup.bash
-
-sudo rosdep init 2>/dev/null || true
-rosdep update
+# First build, or after changing package dependencies:
 rosdep install --from-paths src --ignore-src -r -y
 
+# Rebuild after cloning or changing Python/launch/config files:
 colcon build --symlink-install
 source install/setup.bash
 ```
 
----
+Replace `/path/to/Robot-Motion-Planning-with-MuJoCo-and-MoveIt` with your local repository directory.
 
-## 4. Your existing MuJoCo files
+**After rebuilding, open three separate terminals** and start the components **in the order below**.
 
-Example:
+## 3. Run Task 1 in three terminals
 
-```text
-~/mujoco_pj/
-├── wrs.xml
-├── panda.xml
-└── assets
-```
-
-The bridge preserves the original two-Panda assembly:
-
-```python
-frame1 = [-0.25, 0.45, 0.8]
-frame2 = [ 0.25, 0.45, 0.8]
-
-quat = [0.7071, 0, 0, -0.7071]
-```
-
-The controlled robot is `panda2`.
-
-ROS joint mapping:
-
-```text
-panda_joint1 <-> panda2_joint1
-...
-panda_joint7 <-> panda2_joint7
-```
-
----
-
-# Terminal 1: MuJoCo bridge
+For convenience, in **each** terminal set `WS` to the absolute path of your workspace:
 
 ```bash
+export WS="/path/to/Robot-Motion-Planning-with-MuJoCo-and-MoveIt/moveit_ws"
 source /opt/ros/humble/setup.bash
-source ~/moveit_ws/install/setup.bash
-
-ros2 launch mujoco_moveit_bridge bridge.launch.py \
-  scene_xml:=/home/$USER/mujoco_pj/wrs.xml \
-  panda_xml:=/home/$USER/mujoco_pj/panda.xml
+source "$WS/install/setup.bash"
 ```
 
-Check:
+### Terminal 1 — MuJoCo bridge
+
+Start the MuJoCo simulation and its ROS 2 trajectory-execution bridge:
 
 ```bash
-ros2 topic echo /joint_states --once
+ros2 launch mujoco_moveit_bridge bridge.launch.py
 ```
 
-Expected initial positions approximately:
+The bridge loads the WRS scene and Panda robot XML files. **Wait until the bridge is running before starting the next component.** It provides `/joint_states`, the trajectory action `/panda_arm_controller/follow_joint_trajectory`, and MuJoCo gripper and motion-state services.
 
-```text
-0
--0.785
-0
--2.356
-0
-1.571
-0.785
-```
+### Terminal 2 — MoveIt 2 and RViz
 
-Check the MoveIt execution action:
+In a **new terminal**, repeat the environment setup:
 
 ```bash
-ros2 action list | grep follow_joint_trajectory
-```
-
-Expected:
-
-```text
-/panda_arm_controller/follow_joint_trajectory
-```
-
-Check fingertip center:
-
-```bash
-ros2 topic echo /mujoco/fingertip_center --once
-```
-
-Check gripper:
-
-```bash
-ros2 service call /mujoco/gripper std_srvs/srv/SetBool "{data: true}"
-ros2 service call /mujoco/gripper std_srvs/srv/SetBool "{data: false}"
-```
-
-Check zero-velocity service:
-
-```bash
-ros2 service call /mujoco/wait_until_stopped std_srvs/srv/Trigger "{}"
-```
-
----
-
-# Terminal 2: MoveIt 2 + RViz
-
-```bash
+export WS="/path/to/Robot-Motion-Planning-with-MuJoCo-and-MoveIt/moveit_ws"
 source /opt/ros/humble/setup.bash
-source ~/moveit_ws/install/setup.bash
+source "$WS/install/setup.bash"
 
 ros2 launch panda_mujoco_moveit_config moveit_mujoco.launch.py
 ```
 
-This launches:
+This starts MoveIt 2 (`move_group`), the robot state publisher, and RViz. Wait for MoveIt to initialize before executing the assembly sequence. Motion planning uses OMPL for free-space motion and Pilz `LIN` for linear Cartesian motion.
 
-```text
-robot_state_publisher
-move_group
-RViz2
-```
+### Terminal 3 — Execute the full Task 1 sequence
 
-It intentionally does NOT start Panda FakeSystem or ros2_control.
-
-MoveIt reads the real joint state from the MuJoCo bridge and sends execution trajectories directly to:
-
-```text
-/panda_arm_controller/follow_joint_trajectory
-```
-
-Check both pipelines:
+In a **third terminal**, repeat the environment setup, then invoke the full task runner:
 
 ```bash
-ros2 param get /move_group planning_pipelines
-```
-
-Expected to include:
-
-```text
-ompl
-pilz_industrial_motion_planner
-```
-
-Check Pilz plugin:
-
-```bash
-ros2 param get /move_group pilz_industrial_motion_planner.planning_plugin
-```
-
-Expected:
-
-```text
-pilz_industrial_motion_planner/CommandPlanner
-```
-
-Check Cartesian limits:
-
-```bash
-ros2 param list /move_group | grep cartesian_limits
-```
-
-Expected:
-
-```text
-robot_description_planning.cartesian_limits.max_trans_vel
-robot_description_planning.cartesian_limits.max_trans_acc
-robot_description_planning.cartesian_limits.max_trans_dec
-robot_description_planning.cartesian_limits.max_rot_vel
-```
-
-If these parameters do not appear, do NOT run the pick-place program.
-
----
-
-# Terminal 3: Pick and place
-
-```bash
+export WS="/path/to/Robot-Motion-Planning-with-MuJoCo-and-MoveIt/moveit_ws"
 source /opt/ros/humble/setup.bash
-source ~/moveit_ws/install/setup.bash
+source "$WS/install/setup.bash"
 
-ros2 run panda_moveit_task pick_place --ros-args --params-file ~/moveit_ws/src/panda_moveit_task/config/task.yaml
+bash "$WS/src/panda_moveit_task/run_tasks_all.sh"
 ```
 
-Sequence:
+Keep Terminals 1 and 2 running while Terminal 3 executes the task. The runner resolves its workspace and configuration directory from its own location, so you do not need to change the terminal's current directory to the repository root.
 
-```text
-1  OMPL      -> above grasp
-2            -> open
-3  Pilz LIN  -> straight down to grasp
-4-6          -> close/grasp
-7  Pilz LIN  -> straight +5 cm Z lift
-9  Pilz LIN  -> horizontal translation
-10 Pilz LIN  -> strict -4.4 cm world-Z placement
-12           -> release
-13 OMPL      -> ready
+## 4. Run an individual subtask
+
+Task 1 contains three independently callable subtask runners. **Use one of these commands in Terminal 3 instead of `run_tasks_all.sh`** if you want to execute a specific subtask:
+
+| Subtask | Assembly stage | Script |
+|---|---|---|
+| 1 | L-shaped part assembly | `run_subtask_1.sh` |
+| 2 | Motor assembly | `run_subtask_2.sh` |
+| 3 | Pulley assembly | `run_subtask_3.sh` |
+
+```bash
+# Subtask 1 — L-shaped part assembly
+bash "$WS/src/panda_moveit_task/run_subtask_1.sh"
+
+# Subtask 2 — Motor assembly
+bash "$WS/src/panda_moveit_task/run_subtask_2.sh"
+
+# Subtask 3 — Pulley assembly
+bash "$WS/src/panda_moveit_task/run_subtask_3.sh"
 ```
 
-Target values are from the original MuJoCo script:
+Run **one command at a time**. The individual subtasks may assume an appropriate initial simulation state or previously assembled parts; starting a later subtask from a fresh scene may not reproduce the state reached by the full sequence. Restart the simulation when a clean initial state is required.
 
-```text
-GRASP_POS = [0.25, 0.12, 0.85]
-ABOVE_GRASP = [0.25, 0.12, 0.95]
-LIFT_HEIGHT = 0.05
-horizontal = [-0.19, +0.03, 0.0]
-PLACE_DOWN_DISTANCE = 0.044
-```
+## 5. Robot motion primitives
 
-The settings can be modified in ~/moveit_ws/src/panda_moveit_task/config/task.yaml
+Task 1 is organized around five robot motion primitive types:
+
+| Primitive | Purpose |
+|---|---|
+| `pick_place` | Pick up a part, transport it, and place it at its target pose |
+| `regrasp` | Adjust the grasp or reorient a held part for subsequent assembly |
+| `screw` | Perform screw-related manipulation or fastening actions |
+| `move` | Move the robot between target poses or intermediate configurations |
+| `return` | Return the robot to a designated pose or ready state |
+
+The implementations are provided in the `panda_moveit_task` ROS 2 package. The numbered YAML files in its `config/` directory provide parameters for individual task steps.
+
+## 6. Current status and known limitations
+
+- The workflow is divided into **L-shaped part**, **motor**, and **pulley** assembly stages, with both full-sequence and per-subtask launch scripts.
+- **Incomplete:** The pin insertion and fixation operations underneath the pulley still need further development and validation.
+- Successful workspace compilation does not guarantee successful physical/kinematic execution. Check the MuJoCo simulation, MoveIt planning output, and task logs when testing each stage.
 
 ---
+
+**Recommended startup order:** **Build workspace → Terminal 1 (Bridge) → Terminal 2 (MoveIt/RViz) → Terminal 3 (full Task 1 or one subtask).**
