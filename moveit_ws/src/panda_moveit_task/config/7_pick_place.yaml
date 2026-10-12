@@ -1,0 +1,42 @@
+pick_action_task:
+  ros__parameters:
+    arm: panda2
+    # Final fingertip-center grasp pose.
+    grasp_x: 0.227200
+    grasp_y: 0.036000
+    grasp_z: 0.802000
+
+    # Grasp orientation offsets relative to the initial end-effector orientation.
+    # Unit: degrees.
+    grasp_rx_deg: 0.000000
+    grasp_ry_deg: 0.000000
+
+    approach_distance: 0.150000
+    lift_height: 0.100000
+
+    # Completed final place/insert pose.
+    place_x: 0.062500
+    place_y: 0.061000
+    place_z: 0.859100
+
+    # Place orientation offsets relative to the initial end-effector orientation.
+    # Unit: degrees.
+    place_rx_deg: 0.000000
+    place_ry_deg: 30.000000
+
+    # Allowed: "+y", "-y", "+z", "-z"
+    place_direction: "-y"
+    place_distance: 0.050000
+
+    # Retreat opposite to place_direction after release.
+    retreat_distance: 0.050000
+
+    gripper_open_width: 0.020000
+    grasp_width: 0.005000
+
+    open_and_lift_after_place: true
+
+    velocity_scale: 0.35
+    acceleration_scale: 0.25
+    initial_settle_time: 0.5
+    debug_mode: false

@@ -1,0 +1,13 @@
+move_task:
+  ros__parameters:
+    arm: panda2            
+    planning_mode: "joint_relative"
+    joint_index: 1
+    joint_delta_deg: 90.0
+    joint_duration: 1.0  
+    
+    velocity_scale: 0.35
+    acceleration_scale: 0.25
+    
+    gripper_action: "none"
+    gripper_width: 0.020000

@@ -24,7 +24,13 @@ setup(
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
-            "pick_place = panda_moveit_task.pick_place_script:main",
+            # BEGIN AUTO TASKS
+            'move = panda_moveit_task.move:main',
+            'pick_place = panda_moveit_task.pick_place:main',
+            'regrasp = panda_moveit_task.regrasp:main',
+            'return = panda_moveit_task.return:main',
+            'screw = panda_moveit_task.screw:main',
+            # END AUTO TASKS
         ],
     },
 )

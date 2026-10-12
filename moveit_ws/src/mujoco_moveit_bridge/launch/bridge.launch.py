@@ -5,7 +5,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument("scene_xml", default_value="my_scene.xml"),
+        DeclareLaunchArgument("scene_xml", default_value="wrs.xml"),
         DeclareLaunchArgument("panda_xml", default_value="panda.xml"),
         DeclareLaunchArgument("viewer", default_value="true"),
         Node(

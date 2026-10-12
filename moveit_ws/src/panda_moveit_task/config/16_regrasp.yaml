@@ -1,0 +1,25 @@
+handover_task:
+  ros__parameters:
+    # Receiving arm: panda1 or panda2.
+    arm: panda1
+
+    # Final fingertip-center regrasp pose.
+    handover_x: 0.062800
+    handover_y: 0.179000
+    handover_z: 0.830000
+
+    # Approach axis in gripper LOCAL frame, transformed by target orientation.
+    approach_x: 0.000000
+    approach_y: 0.000000
+    approach_z: 1.000000
+    approach_distance: 0.000000
+
+    receiver_grasp_width: 0.005000
+    giver_open_width: 0.080000
+    giver_retreat_height: 0.100000
+
+    # WORLD X rotation shared by end-effector orientation and approach direction.
+    x_rotation_deg: -45.000000
+
+    velocity_scale: 0.35
+    acceleration_scale: 0.25

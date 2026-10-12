@@ -1,0 +1,41 @@
+screw_task:
+  ros__parameters:
+    # Read screwdriver pickup origin/orientation and screwdriver_tip geometry
+    # directly from this MuJoCo scene XML.
+    scene_xml: "mujoco_pj/wrs.xml"
+
+    # Select the robot MoveIt namespace: "panda1" or "panda2".
+    # The bridge must expose /<robot>/plan_to_pose,
+    # /<robot>/execute_next_plan and /<robot>/clear_plan_queue.
+    robot: "panda2"
+
+    # Number of screws to execute. Configure screw_1 ... screw_N below.
+    screw_count: 1
+
+    # Screwdriver pickup behavior. Pickup XYZ is NOT set here; it comes from
+    # body name="screwdriver" in scene_xml.
+    pickup_approach_distance: 0.100
+    pickup_grasp_width: 0.024
+    pickup_lift_distance: 0.100
+
+    # ------------------------------------------------------------
+    # Screw 1
+    # tip_* = desired world XYZ of screwdriver_tip at screw contact.
+    # rx_deg = screwdriver/gripper WORLD-X rotation relative to Q0.
+    # approach_direction = insertion/screwing direction.
+    # approach pose = tip - direction * approach_distance.
+    # During screw-down, the screwdriver moves another down_distance along
+    # approach_direction and the nearest screw follows synchronously.
+    # ------------------------------------------------------------
+    screw_1_tip_x: 0.0627
+    screw_1_tip_y: 0.0550
+    screw_1_tip_z: 0.8227
+    screw_1_rx_deg: 0.0
+    screw_1_approach_distance: 0.030
+    screw_1_approach_direction: "-y"
+    screw_1_shaft_speed: 4.0
+    screw_1_down_distance: 0.005
+
+    velocity_scale: 0.25
+    acceleration_scale: 0.20
+    initial_settle_time: 0.5

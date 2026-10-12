@@ -117,7 +117,7 @@ Example:
 
 ```text
 ~/mujoco_pj/
-├── my_scene.xml
+├── wrs.xml
 ├── panda.xml
 └── assets
 ```
@@ -150,7 +150,7 @@ source /opt/ros/humble/setup.bash
 source ~/moveit_ws/install/setup.bash
 
 ros2 launch mujoco_moveit_bridge bridge.launch.py \
-  scene_xml:=/home/$USER/mujoco_pj/my_scene.xml \
+  scene_xml:=/home/$USER/mujoco_pj/wrs.xml \
   panda_xml:=/home/$USER/mujoco_pj/panda.xml
 ```
 

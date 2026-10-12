@@ -1,0 +1,16 @@
+return_task:
+  ros__parameters:
+    # panda1 / panda2 / both
+    arm: "both"
+    retreat_distance: 0.05
+    gripper_open_width: 0.08
+    return_duration: 2.0
+    velocity_scale: 0.35
+    acceleration_scale: 0.25
+    initial_j1: 0.0
+    initial_j2: -0.785
+    initial_j3: 0.0
+    initial_j4: -2.356
+    initial_j5: 0.0
+    initial_j6: 1.571
+    initial_j7: 0.785
