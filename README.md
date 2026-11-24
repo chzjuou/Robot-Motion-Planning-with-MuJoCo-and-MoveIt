@@ -73,8 +73,8 @@ Start the MuJoCo simulation and its ROS 2 trajectory-execution bridge:
 
 ```bash
 ros2 launch mujoco_moveit_bridge bridge.launch.py \
-  scene_xml:=/home/$USER/mujoco_pj/wrs.xml \
-  panda_xml:=/home/$USER/mujoco_pj/panda.xml
+  scene_xml:="$WS/../mujoco_pj/wrs.xml" \
+  panda_xml:="$WS/../mujoco_pj/panda.xml"
 ```
 
 The bridge loads the WRS scene and Panda robot XML files. **Wait until the bridge is running before starting the next component.** It provides `/joint_states`, the trajectory action `/panda_arm_controller/follow_joint_trajectory`, and MuJoCo gripper and motion-state services.
