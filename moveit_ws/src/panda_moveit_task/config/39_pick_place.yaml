@@ -9,7 +9,7 @@ pick_action_task:
     # Grasp orientation offsets relative to the initial end-effector orientation.
     # Unit: degrees.
     grasp_rx_deg: 20.000000
-    grasp_ry_deg: 0.000000
+    grasp_ry_deg: -5.000000
     grasp_rz_deg: 0.000000
 
     approach_distance: 0.050000
@@ -23,7 +23,7 @@ pick_action_task:
     # Place orientation offsets relative to the initial end-effector orientation.
     # Unit: degrees.
     place_rx_deg: 20.000000
-    place_ry_deg: 0.000000
+    place_ry_deg: -5.000000
     place_rz_deg: 0.000000
 
     # Allowed: "+y", "-y", "+z", "-z"
@@ -31,9 +31,9 @@ pick_action_task:
     place_distance: 0.030000
 
     # Retreat opposite to place_direction after release.
-    retreat_distance: 0.030000
+    retreat_distance: 0.045000
 
-    gripper_open_width: 0.020000
+    gripper_open_width: 0.010000
     grasp_width: 0.006000
 
     open_and_lift_after_place: true
