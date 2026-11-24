@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 
-WORKSPACE="/home/yo/mujoco/mujoco_menagerie/franka_emika_panda/moveit_ws"
+# Resolve ROS 2 workspace from this script's location instead of a user-specific path.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE="${MOVEIT_WS:-}"
+if [ -z "$WORKSPACE" ]; then
+    SEARCH_DIR="$SCRIPT_DIR"
+    while [ "$SEARCH_DIR" != / ]; do
+        if [ -f "$SEARCH_DIR/src/panda_moveit_task/package.xml" ] || [ -f "$SEARCH_DIR/src/panda_moveit_task/setup.py" ]; then
+            WORKSPACE="$SEARCH_DIR"
+            break
+        fi
+        SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+    done
+fi
+if [ -z "$WORKSPACE" ]; then
+    echo "ERROR: Cannot locate moveit_ws. Set MOVEIT_WS to your ROS 2 workspace directory."
+    exit 1
+fi
 CONFIG_DIR="$WORKSPACE/src/panda_moveit_task/config"
 PACKAGE="panda_moveit_task"
 
