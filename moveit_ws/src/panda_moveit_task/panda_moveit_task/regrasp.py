@@ -40,8 +40,11 @@ class HandoverTask(Node):
         )
         self.sequence_base_orientation = None
         self.p1_tcp_pose = None
+        self.p2_tcp_pose = None
         self.create_subscription(PoseStamped, "/mujoco/panda1_tcp_pose",
                                  self._p1_tcp_cb, 20)
+        self.create_subscription(PoseStamped, "/mujoco/panda2_tcp_pose",
+                                 self._p2_tcp_cb, 20)
 
         self.p2_plan = self.create_client(PlanToPose, "/panda2/plan_to_pose")
         self.p2_exec = self.create_client(Trigger, "/panda2/execute_next_plan")
@@ -50,11 +53,6 @@ class HandoverTask(Node):
         self.p1_plan = self.create_client(PlanToPose, "/panda1/plan_to_pose")
         self.p1_exec = self.create_client(Trigger, "/panda1/execute_next_plan")
         self.p1_clear = self.create_client(Trigger, "/panda1/clear_plan_queue")
-
-        self.p2_relz_plan = self.create_client(
-            PlanToPose, "/mujoco/panda2_plan_relative_z")
-        self.p2_relz_exec = self.create_client(
-            Trigger, "/mujoco/panda2_execute_relative_z")
 
         self.p1_grip = ActionClient(
             self, GripperCommand, "/mujoco/panda1_gripper_command")
@@ -67,26 +65,27 @@ class HandoverTask(Node):
         q = msg.pose.orientation
         self.p1_tcp_pose = ([p.x, p.y, p.z], [q.x, q.y, q.z, q.w])
 
+    def _p2_tcp_cb(self, msg):
+        p = msg.pose.position
+        q = msg.pose.orientation
+        self.p2_tcp_pose = ([p.x, p.y, p.z], [q.x, q.y, q.z, q.w])
+
     def p(self, n):
         return self.get_parameter(n).value
 
 
     def wait_all(self):
         arm = str(self.p("arm")).lower()
-        for name, c in ([
+        # Both arms need normal pose planning: the giver retreats along its
+        # own gripper axis rather than using the old world +Z-only service.
+        for name, c in [
             ("Panda1 plan", self.p1_plan),
             ("Panda1 execute", self.p1_exec),
             ("Panda1 clear", self.p1_clear),
-            ("Panda2 relative-Z plan", self.p2_relz_plan),
-            ("Panda2 relative-Z execute", self.p2_relz_exec),
-        ] if arm == "panda1" else [
             ("Panda2 plan", self.p2_plan),
             ("Panda2 execute", self.p2_exec),
             ("Panda2 clear", self.p2_clear),
-            ("Panda1 plan", self.p1_plan),
-            ("Panda1 execute", self.p1_exec),
-            ("Panda1 clear", self.p1_clear),
-        ]):
+        ]:
             if not c.wait_for_service(timeout_sec=10.0):
                 raise RuntimeError(f"Missing service: {name}")
 
@@ -174,24 +173,51 @@ class HandoverTask(Node):
             raise RuntimeError(
                 f"Panda1 planning failed: {getattr(r, 'message', '')}")
 
-    def queue_p2_lift(self):
-        # Bridge interprets target.position.z as RELATIVE world +Z displacement.
-        req = PlanToPose.Request()
-        req.target.header.frame_id = "world"
-        req.target.pose.position.z = abs(float(self.p("giver_retreat_height")))
-        req.target.pose.orientation.w = 1.0
-        req.linear = True
-        req.execute = False
-        req.velocity_scale = float(self.p("velocity_scale"))
-        req.acceleration_scale = float(self.p("acceleration_scale"))
+    @staticmethod
+    def rotate_vector(q, v):
+        """Rotate a vector from TCP local coordinates into world coordinates."""
+        qx, qy, qz, qw = (float(x) for x in q)
+        n = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+        if n < 1e-12:
+            raise RuntimeError("Invalid TCP quaternion for retreat")
+        qx, qy, qz, qw = qx/n, qy/n, qz/n, qw/n
+        vx, vy, vz = v
+        tx, ty, tz = (2*(qy*vz-qz*vy), 2*(qz*vx-qx*vz),
+                      2*(qx*vy-qy*vx))
+        return [vx + qw*tx + qy*tz - qz*ty,
+                vy + qw*ty + qz*tx - qx*tz,
+                vz + qw*tz + qx*ty - qy*tx]
 
-        f = self.p2_relz_plan.call_async(req)
-        rclpy.spin_until_future_complete(self, f)
-        r = f.result()
-        if r is None or not r.success:
-            raise RuntimeError(
-                f"Panda2 +Z preplanning failed: {getattr(r, 'message', '')}")
-        self.get_logger().info(getattr(r, "message", "Panda2 +Z ready"))
+    def queue_giver_retreat(self, giver):
+        """Plan a straight backward motion along the giver's OWN TCP axis."""
+        self.trigger(self.p1_clear if giver == "panda1" else self.p2_clear,
+                     f"clear {giver} retreat queue")
+        deadline = time.monotonic() + 5.0
+        pose = None
+        while time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            pose = self.p1_tcp_pose if giver == "panda1" else self.p2_tcp_pose
+            if pose is not None:
+                break
+        if pose is None:
+            raise RuntimeError(f"No /mujoco/{giver}_tcp_pose for retreat")
+        pos, q = pose
+        axis = [float(self.p(k)) for k in
+                ("approach_x", "approach_y", "approach_z")]
+        norm = math.sqrt(sum(v*v for v in axis))
+        if norm < 1e-9:
+            raise RuntimeError("local approach axis cannot be zero")
+        # Retreat is OPPOSITE to the gripper's local approach direction.
+        backward = self.rotate_vector(q, [-v/norm for v in axis])
+        length = abs(float(self.p("giver_retreat_height")))
+        target = [pos[i] + length*backward[i] for i in range(3)]
+        self.get_logger().info(
+            f"{giver} LOCAL-AXIS retreat: {pos} -> {target}; "
+            f"world backward={backward}; keep orientation={q}")
+        if giver == "panda1":
+            self.queue_p1(target, True, orientation=q)
+        else:
+            self.queue_p2(target, True, orientation=q)
 
     def grip(self, client, width, label, grasp=False):
         goal = GripperCommand.Goal()
@@ -212,14 +238,14 @@ class HandoverTask(Node):
         if grasp and not wrapped.result.reached_goal:
             raise RuntimeError(f"{label}: receiver did not attach object (reached_goal=False)")
 
-    def queue_p2(self, pos, linear):
+    def queue_p2(self, pos, linear, orientation=None):
         req = PlanToPose.Request()
         req.target.header.frame_id = "world"
         req.target.pose.position.x = float(pos[0])
         req.target.pose.position.y = float(pos[1])
         req.target.pose.position.z = float(pos[2])
-        q = self.rotate_world_x(self.sequence_base_orientation,
-                                self.p("x_rotation_deg"))
+        q = orientation if orientation is not None else self.rotate_world_x(
+            self.sequence_base_orientation, self.p("x_rotation_deg"))
         req.target.pose.orientation.x = q[0]
         req.target.pose.orientation.y = q[1]
         req.target.pose.orientation.z = q[2]
@@ -247,19 +273,8 @@ class HandoverTask(Node):
                 "retain GIVER retreat after transfer")
             # Only preplan the giver's departure. The receiver stays at its
             # current pose and closes its gripper without any approach plan.
-            if arm == "panda1":
-                self.queue_p2_lift()
-            else:
-                self.trigger(self.p1_clear, "clear Panda1 retreat queue")
-                deadline = time.monotonic() + 5.0
-                while self.p1_tcp_pose is None and time.monotonic() < deadline:
-                    rclpy.spin_once(self, timeout_sec=0.1)
-                if self.p1_tcp_pose is None:
-                    raise RuntimeError("No /mujoco/panda1_tcp_pose for retreat")
-                p1_position, p1_orientation = self.p1_tcp_pose
-                p1_retreat = [p1_position[0], p1_position[1],
-                              p1_position[2] + abs(float(self.p("giver_retreat_height")))]
-                self.queue_p1(p1_retreat, True, orientation=p1_orientation)
+            giver = "panda2" if arm == "panda1" else "panda1"
+            self.queue_giver_retreat(giver)
             self.get_logger().info("GIVER RETREAT PLANNING SUCCEEDED")
             self.grip(self.p1_grip if arm == "panda1" else self.p2_grip,
                       self.p("receiver_grasp_width"),
@@ -269,9 +284,9 @@ class HandoverTask(Node):
                       self.p("giver_open_width"), "Giver open/detach")
             time.sleep(0.3)
             if arm == "panda1":
-                self.trigger(self.p2_relz_exec, "Panda2 +Z retreat")
+                self.trigger(self.p2_exec, "Panda2 local-axis retreat")
             else:
-                self.trigger(self.p1_exec, "Panda1 +Z retreat")
+                self.trigger(self.p1_exec, "Panda1 local-axis retreat")
             self.get_logger().info("REGRASP SEQUENCE FINISHED (zero approach)")
             return
         self.sequence_base_orientation = self.load_sequence_reference()
@@ -309,7 +324,7 @@ class HandoverTask(Node):
             self.queue_p1(pre, False)
             if distance > 1e-9:
                 self.queue_p1(final, True)
-            self.queue_p2_lift()
+            self.queue_giver_retreat("panda2")
             self.get_logger().info("ALL PLANNING SUCCEEDED")
             self.trigger(self.p1_exec, "Panda1 pre-approach")
             if distance > 1e-9:
@@ -320,29 +335,14 @@ class HandoverTask(Node):
             self.grip(self.p2_grip, self.p("giver_open_width"),
                       "Panda2 open/detach")
             time.sleep(0.3)
-            self.trigger(self.p2_relz_exec, "Panda2 +Z lift")
+            self.trigger(self.p2_exec, "Panda2 local-axis retreat")
         else:
             # Reverse direction: Panda2 receives an object from Panda1.
             self.trigger(self.p2_clear, "clear Panda2 queue")
             self.queue_p2(pre, False)
             if distance > 1e-9:
                 self.queue_p2(final, True)
-            self.trigger(self.p1_clear, "clear Panda1 queue")
-            # The releasing Panda1 must retreat from its OWN current TCP pose,
-            # not from Panda2's handover target. Preserve Panda1 orientation.
-            # Otherwise the old code teleports toward Panda2's approach pose.
-            deadline = time.monotonic() + 5.0
-            while self.p1_tcp_pose is None and time.monotonic() < deadline:
-                rclpy.spin_once(self, timeout_sec=0.1)
-            if self.p1_tcp_pose is None:
-                raise RuntimeError("No /mujoco/panda1_tcp_pose for retreat")
-            p1_position, p1_orientation = self.p1_tcp_pose
-            p1_retreat = [p1_position[0], p1_position[1],
-                          p1_position[2] + abs(float(self.p("giver_retreat_height")))]
-            self.get_logger().info(
-                f"Panda1 WORLD +Z retreat: {p1_position} -> {p1_retreat}; "
-                f"keep orientation={p1_orientation}")
-            self.queue_p1(p1_retreat, True, orientation=p1_orientation)
+            self.queue_giver_retreat("panda1")
             self.get_logger().info("ALL PLANNING SUCCEEDED")
             self.trigger(self.p2_exec, "Panda2 pre-approach")
             if distance > 1e-9:
@@ -353,7 +353,7 @@ class HandoverTask(Node):
             self.grip(self.p1_grip, self.p("giver_open_width"),
                       "Panda1 open/old-owner release")
             time.sleep(0.3)
-            self.trigger(self.p1_exec, "Panda1 +Z retreat")
+            self.trigger(self.p1_exec, "Panda1 local-axis retreat")
         self.get_logger().info("REGRASP SEQUENCE FINISHED")
 
 

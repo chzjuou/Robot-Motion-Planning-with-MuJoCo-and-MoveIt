@@ -11,8 +11,8 @@ pick_action_task:
     grasp_rx_deg: 0.000000
     grasp_ry_deg: 0.000000
 
-    approach_distance: 0.100000
-    lift_height: 0.100000
+    approach_distance: 0.050000
+    lift_height: 0.050000
 
     # Completed final place/insert pose.
     place_x: 0.055000
@@ -29,7 +29,7 @@ pick_action_task:
     place_distance: 0.050000
 
     # Retreat opposite to place_direction after release.
-    retreat_distance: 0.100000
+    retreat_distance: 0.150000
 
     gripper_open_width: 0.080000
     grasp_width: 0.032000

@@ -16,49 +16,6 @@ from std_srvs.srv import Trigger
 from panda_moveit_planner.srv import PlanToPose
 
 
-def resolve_scene_xml(scene_xml: str) -> Path:
-    """Find a MuJoCo scene independently of the shell working directory.
-
-    Supports absolute paths, PANDA_PROJECT_ROOT, and the repository layout
-    <project>/moveit_ws/src/panda_moveit_task and <project>/mujoco_pj.
-    """
-    requested = Path(scene_xml).expanduser()
-    if requested.is_absolute():
-        if requested.is_file():
-            return requested.resolve()
-        raise FileNotFoundError(f"Scene XML does not exist: {requested}")
-
-    candidates = []
-    project_root = os.environ.get("PANDA_PROJECT_ROOT")
-    if project_root:
-        candidates.append(Path(project_root).expanduser() / requested)
-
-    # Also works with typical colcon install layouts, including symlink-install.
-    for anchor in (Path(__file__).resolve(), Path(__file__).absolute()):
-        for parent in anchor.parents:
-            candidates.append(parent / requested)
-            # A workspace might be invoked directly as the root.
-            candidates.append(parent / "mujoco_pj" / requested.name)
-
-    # Last fallback for users invoking the command from the project directory.
-    candidates.append(Path.cwd() / requested)
-
-    seen = set()
-    for candidate in candidates:
-        key = str(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
-        if candidate.is_file():
-            return candidate.resolve()
-
-    raise FileNotFoundError(
-        f"Cannot locate scene_xml={scene_xml!r}. "
-        "Keep mujoco_pj beside moveit_ws, or set PANDA_PROJECT_ROOT "
-        "to the directory containing mujoco_pj."
-    )
-
-
 class ScrewTask(Node):
     """
     Pick the screwdriver from its pose in scene_xml, keep it grasped, execute
@@ -445,7 +402,9 @@ class ScrewTask(Node):
         self.execute_next_plan(name)
 
     def parse_screwdriver_from_xml(self):
-        path = resolve_scene_xml(str(self.param("scene_xml")))
+        path = Path(str(self.param("scene_xml")))
+        if not path.exists():
+            raise RuntimeError(f"scene_xml not found: {path}")
 
         root = ET.parse(path).getroot()
         body = root.find(".//body[@name='screwdriver']")

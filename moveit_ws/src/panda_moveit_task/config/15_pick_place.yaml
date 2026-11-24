@@ -15,9 +15,9 @@ pick_action_task:
     lift_height: 0.100000
 
     # Completed final place/insert pose.
-    place_x: 0.062800
+    place_x: 0.062500
     place_y: 0.159000
-    place_z: 0.832200
+    place_z: 0.833200
 
     # Place orientation offsets relative to the initial end-effector orientation.
     # Unit: degrees.

@@ -13,7 +13,7 @@ class ReturnTask(Node):
     def __init__(self):
         super().__init__("return_task")
         defaults = {
-            "arm": "both", "retreat_distance": 0.05,
+            "arm": "both", "return_first_arm": "panda1", "retreat_distance": 0.05,
             "gripper_open_width": 0.08, "return_duration": 3.0,
             "velocity_scale": 0.35, "acceleration_scale": 0.25,
             "initial_j1": 0.0, "initial_j2": -0.785, "initial_j3": 0.0,
@@ -160,20 +160,36 @@ class ReturnTask(Node):
         f=gh.get_result_async(); rclpy.spin_until_future_complete(self,f)
 
     def run(self):
-        a=self.arms(); self.get_logger().info(f"Return arm={a}"); self.wait_all(a)
-        # Retreats are preplanned before any arm motion.
-        if a in ("panda1","both"): self.plan_p1_retreat()
-        if a in ("panda2","both"): self.plan_p2_retreat()
-        self.get_logger().info("RETREAT PLANNING SUCCEEDED")
-        # Open first. Panda2 open also detaches any currently grasped object.
-        if a in ("panda1","both"): self.open(self.p1_grip,"Panda1")
-        if a in ("panda2","both"): self.open(self.p2_grip,"Panda2")
-        # Retreat along each robot TCP local -Z axis.
-        if a in ("panda1","both"): self.trigger(self.p1_exec,"Panda1 tool-axis retreat")
-        if a in ("panda2","both"): self.trigger(self.p2_exec,"Panda2 tool-axis retreat")
-        # Return to the configured initial joint state.
-        if a in ("panda1","both"): self.go_q0(self.p1_traj,True)
-        if a in ("panda2","both"): self.go_q0(self.p2_traj,False)
+        a = self.arms()
+        first = str(self.p("return_first_arm")).strip().lower()
+        first = {"1": "panda1", "p1": "panda1", "2": "panda2", "p2": "panda2"}.get(first, first)
+        if a == "both" and first not in ("panda1", "panda2"):
+            raise RuntimeError("return_first_arm must be panda1 or panda2 when arm=both")
+        order = ([first, "panda2" if first == "panda1" else "panda1"]
+                 if a == "both" else [a])
+        self.get_logger().info(f"Return arm={a}, execution order={order}")
+        self.wait_all(a)
+
+        # Preplan both retreats before opening either gripper or moving an arm.
+        for arm in order:
+            if arm == "panda1":
+                self.plan_p1_retreat()
+            else:
+                self.plan_p2_retreat()
+        self.get_logger().info("ALL RETREAT PLANNING SUCCEEDED")
+
+        # Fully finish the first arm before moving the second arm.
+        for arm in order:
+            self.get_logger().info(f"BEGIN {arm.upper()} RETURN")
+            if arm == "panda1":
+                self.open(self.p1_grip, "Panda1")
+                self.trigger(self.p1_exec, "Panda1 tool-axis retreat")
+                self.go_q0(self.p1_traj, True)
+            else:
+                self.open(self.p2_grip, "Panda2")
+                self.trigger(self.p2_exec, "Panda2 tool-axis retreat")
+                self.go_q0(self.p2_traj, False)
+            self.get_logger().info(f"FINISHED {arm.upper()} RETURN")
         self.get_logger().info("RETURN TASK COMPLETE")
 
 def main(args=None):

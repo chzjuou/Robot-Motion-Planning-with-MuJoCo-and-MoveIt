@@ -21,48 +21,9 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 from panda_moveit_planner.srv import PlanToPose
 
 
-def resolve_mujoco_xml(value: str) -> Path:
-    """Locate a MuJoCo XML without depending on the process working directory.
-
-    Supports absolute paths, PANDA_PROJECT_ROOT, source/symlink installs,
-    ROS workspace install prefixes, and the current directory as a fallback.
-    """
-    requested = Path(str(value)).expanduser()
-    if requested.is_absolute():
-        if requested.is_file():
-            return requested.resolve()
-        raise FileNotFoundError(f"MuJoCo XML not found: {requested}")
-
-    candidates = []
-    project_root = os.environ.get("PANDA_PROJECT_ROOT")
-    if project_root:
-        root = Path(project_root).expanduser()
-        candidates.extend((root / requested, root / "mujoco_pj" / requested))
-
-    # With colcon --symlink-install, __file__ usually points into src/.
-    # Also handle install/ paths when the original workspace still exists.
-    roots = [Path(__file__).resolve(), Path(__file__).absolute(), Path.cwd()]
-    for var in ("AMENT_PREFIX_PATH", "COLCON_PREFIX_PATH"):
-        roots.extend(Path(p) for p in os.environ.get(var, "").split(os.pathsep) if p)
-
-    for anchor in roots:
-        for parent in (anchor, *anchor.parents):
-            candidates.extend((parent / requested, parent / "mujoco_pj" / requested))
-
-    seen = set()
-    for candidate in candidates:
-        key = str(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
-        if candidate.is_file():
-            return candidate.resolve()
-
-    raise FileNotFoundError(
-        f"MuJoCo XML not found: {requested}. "
-        "Keep mujoco_pj next to moveit_ws, pass an absolute XML path, "
-        "or set PANDA_PROJECT_ROOT to the repository root."
-    )
+class _ContinuousOrbitPlan(list):
+    """Tagged trajectory: interpolate without stopping at internal waypoints."""
+    pass
 
 
 class MujocoMoveItBridge(Node):
@@ -77,7 +38,7 @@ class MujocoMoveItBridge(Node):
     def __init__(self):
         super().__init__("mujoco_moveit_bridge")
 
-        self.declare_parameter("scene_xml", "wrs.xml")
+        self.declare_parameter("scene_xml", "my_scene.xml")
         self.declare_parameter("panda_xml", "panda.xml")
         self.declare_parameter("viewer", True)
         self.declare_parameter("realtime_factor", 1.0)
@@ -111,6 +72,20 @@ class MujocoMoveItBridge(Node):
         self.grasp_rel_pos_hand = np.zeros(3, dtype=float)
         self.grasp_rel_R_hand = np.eye(3, dtype=float)
         self.pick_objects = []
+        # Rigid tip-to-object attachments, keyed by target body name.
+        self.hex_tip_attachments = {}
+        self.hex_tip_ever_attached = False  # latch: never attach a second time after detach
+        self.hex_tip_contact_radius = 0.012  # m: contact must be close to the tip site
+        self.hex_tip_auto_contact_steps = 3
+        self.hex_tip_contact_streak = 0
+        # Enabled by pick_place only after its complete execution sequence.
+        self.part_32_33_auto_attach_enabled = False
+        self.part_32_33_attachment = None
+        self.part_32_33_contact_streak = 0
+        self.part_32_33_contact_steps = 3
+        self.part_32_33_attach_gap = 0.0015  # 1.5 mm mesh-surface tolerance
+        self.part_32_33_check_count = 0
+        self.part_32_33_last_report = 0.0
 
         # Screw action state. The task configures direction/speed/distance plus
         # YAML target tip XYZ. /mujoco/screw_start selects the freejoint object
@@ -221,6 +196,31 @@ class MujocoMoveItBridge(Node):
         # Automatically discover every scene object whose body owns a free joint.
         # Panda robot bodies are excluded by name prefix.
         self._discover_pick_objects()
+        self.part_32 = next((o for o in self.pick_objects if o["name"] == "part_3_2"), None)
+        self.part_33 = next((o for o in self.pick_objects if o["name"] == "part_3_3"), None)
+        if self.part_32 is None or self.part_33 is None:
+            raise RuntimeError("Scene needs freejoint part_3_2 and part_3_3")
+        self.part_32_geom_ids = frozenset(self._object_geom_ids(self.part_32))
+        self.part_33_geom_ids = frozenset(self._object_geom_ids(self.part_33))
+        self.hex_key_tip_site = self._id(mujoco.mjtObj.mjOBJ_SITE, "hex_key_tip")
+        self.hex_key_body = self._id(mujoco.mjtObj.mjOBJ_BODY, "hex_key")
+        self.hex_key_object = next(
+            (obj for obj in self.pick_objects if obj["name"] == "hex_key"), None
+        )
+        if self.hex_key_object is None:
+            raise RuntimeError("Scene needs a freejoint hex_key body")
+        # Cache geom ownership once, not every simulation step.
+        self.hex_geom_ids = frozenset(self._object_geom_ids(self.hex_key_object))
+        self.hex_candidate_by_geom = {}
+        for obj in self.pick_objects:
+            if obj["name"] in ("hex_key", "screwdriver"):
+                continue
+            for gid in self._object_geom_ids(obj):
+                self.hex_candidate_by_geom[gid] = obj
+        self.hex_contact_check_counter = 0
+        self.hex_tip_candidate_name = None
+        self.hex_contact_check_interval = 10  # reduce Python work in simulation loop
+
 
         # Motorized screwdriver elements from WRS scene.
         self.screwdriver_tip_site = self._id(
@@ -314,6 +314,53 @@ class MujocoMoveItBridge(Node):
             10,
             callback_group=ReentrantCallbackGroup(),
         )
+        # Push-only contact latch. Enabled exclusively for the straight push segment.
+        self.push_active = {"panda1": False, "panda2": False}
+        self.push_object = {"panda1": None, "panda2": None}
+        # Only the FIRST search trajectory may be interrupted by contact.
+        self.push_search_interrupted = {"panda1": False, "panda2": False}
+        self.push_contact_gap = 0.000  # signed collision-geom surface distance <= 0 mm
+        self.push_contact_check_interval = 5  # simulation cycles between queries
+        self.push_contact_cycle = 0
+        self.push_previous_sample = {"panda1": None, "panda2": None}
+        # The task supplies the WORLD push axis before enabling the latch.
+        self.push_first_contact_tcp = {"panda1": None, "panda2": None}
+        self.push_status_services = [
+            self.create_service(Trigger, f"/mujoco/{arm}/push_status",
+                lambda request, response, a=arm: self._push_status_cb(a, request, response),
+                callback_group=ReentrantCallbackGroup())
+            for arm in ("panda1", "panda2")
+        ]
+        self.push_direction = {"panda1": None, "panda2": None}
+        self.push_direction_sub = self.create_subscription(
+            Float64MultiArray, "/mujoco/push_direction",
+            self._push_direction_cb, 10,
+            callback_group=ReentrantCallbackGroup())
+        self.push_front_tolerance = 0.002  # m, tolerance for front-most fingertip face
+        self.push_services = [
+            self.create_service(
+                SetBool, f"/mujoco/{arm}/push_contact",
+                lambda request, response, a=arm: self._push_contact_cb(a, request, response),
+                callback_group=ReentrantCallbackGroup())
+            for arm in ("panda1", "panda2")
+        ]
+        self.part_32_33_enable_srv = self.create_service(
+            Trigger, "/mujoco/enable_part_3_2_3_3_attach",
+            self._enable_part_32_33_attach_cb,
+            callback_group=ReentrantCallbackGroup(),
+        )
+        self.hex_tip_attach_srv = self.create_service(
+            Trigger, "/mujoco/hex_key_tip_attach", self._hex_tip_attach_cb,
+            callback_group=ReentrantCallbackGroup(),
+        )
+        self.hex_tip_axis_srv = self.create_service(
+            Trigger, "/mujoco/hex_key_attached_axis", self._hex_key_attached_axis_cb,
+            callback_group=ReentrantCallbackGroup(),
+        )
+        self.hex_tip_detach_srv = self.create_service(
+            Trigger, "/mujoco/hex_key_tip_detach", self._hex_tip_detach_cb,
+            callback_group=ReentrantCallbackGroup(),
+        )
         self.screw_start_srv = self.create_service(
             Trigger,
             "/mujoco/screw_start",
@@ -396,6 +443,16 @@ class MujocoMoveItBridge(Node):
             self._p2_execute_next_plan_cb,
             callback_group=ReentrantCallbackGroup()
         )
+        self.p1_orbit_srv = self.create_service(
+            PlanToPose, "/mujoco/panda1_plan_continuous_orbit",
+            lambda req, resp: self._plan_continuous_orbit("panda1", req, resp),
+            callback_group=ReentrantCallbackGroup(),
+        )
+        self.p2_orbit_srv = self.create_service(
+            PlanToPose, "/mujoco/panda2_plan_continuous_orbit",
+            lambda req, resp: self._plan_continuous_orbit("panda2", req, resp),
+            callback_group=ReentrantCallbackGroup(),
+        )
         self.p2_clear_srv = self.create_service(
             Trigger,
             "/panda2/clear_plan_queue",
@@ -431,7 +488,15 @@ class MujocoMoveItBridge(Node):
             callback_group=ReentrantCallbackGroup()
         )
 
-        self.viewer = mujoco.viewer.launch_passive(self.model, self.data) if self.use_viewer else None
+        self.viewer = (
+            mujoco.viewer.launch_passive(
+                self.model,
+                self.data,
+                show_left_ui=False,
+                show_right_ui=False,
+            )
+            if self.use_viewer else None
+        )
         if self.viewer is not None:
             self.viewer.cam.lookat[:] = [0.0, 0.15, 0.8]
             self.viewer.cam.distance = 1.0
@@ -506,14 +571,14 @@ class MujocoMoveItBridge(Node):
         )
 
     def _build_model(self, scene_xml, panda_xml):
-        scene_path = resolve_mujoco_xml(scene_xml)
-        panda_path = resolve_mujoco_xml(panda_xml)
-        self.get_logger().info(f"MuJoCo scene XML: {scene_path}")
-        self.get_logger().info(f"MuJoCo Panda XML: {panda_path}")
+        if not Path(scene_xml).exists():
+            raise FileNotFoundError(f"scene_xml not found: {scene_xml}")
+        if not Path(panda_xml).exists():
+            raise FileNotFoundError(f"panda_xml not found: {panda_xml}")
 
-        scene = mujoco.MjSpec.from_file(str(scene_path))
-        panda1 = mujoco.MjSpec.from_file(str(panda_path))
-        panda2 = mujoco.MjSpec.from_file(str(panda_path))
+        scene = mujoco.MjSpec.from_file(scene_xml)
+        panda1 = mujoco.MjSpec.from_file(panda_xml)
+        panda2 = mujoco.MjSpec.from_file(panda_xml)
 
         frame1 = scene.worldbody.add_frame(pos=[-0.25, 0.45, 0.8], quat=[0.7071, 0, 0, -0.7071])
         frame2 = scene.worldbody.add_frame(pos=[0.25, 0.45, 0.8], quat=[0.7071, 0, 0, -0.7071])
@@ -905,6 +970,323 @@ class MujocoMoveItBridge(Node):
                 return arm
         return None
 
+    def _enable_part_32_33_attach_cb(self, request, response):
+        with self.lock:
+            self.part_32_33_auto_attach_enabled = True
+            self.part_32_33_contact_streak = 0
+            self.part_32_33_last_report = 0.0
+            self.get_logger().info("Part 3-2/3-3 auto attach ENABLED; geometry-distance monitoring started")
+            response.success = True
+            response.message = ("part_3_2/part_3_3 already attached" if self.part_32_33_attachment
+                                else "part_3_2/part_3_3 contact attachment enabled")
+        return response
+
+    def _part_32_33_surface_distance(self):
+        """Minimum signed surface distance, even with contact masks disabled.
+
+        mj_geomDistance performs a direct collision-distance query independent of
+        model.geom_contype / geom_conaffinity.  It does not change the dynamics.
+        """
+        nearest = float("inf")
+        pair = None
+        for g1 in self.part_32_geom_ids:
+            for g2 in self.part_33_geom_ids:
+                # Skip distant pairs cheaply; a bounding sphere is only a
+                # broad-phase rejection, NEVER sufficient to claim contact.
+                center_distance = float(np.linalg.norm(
+                    self.data.geom_xpos[g1] - self.data.geom_xpos[g2]))
+                bound = (float(self.model.geom_rbound[g1])
+                         + float(self.model.geom_rbound[g2]))
+                if center_distance - bound > self.part_32_33_attach_gap:
+                    continue
+                fromto = np.zeros(6, dtype=float)
+                distance = float(mujoco.mj_geomDistance(
+                    self.model, self.data, int(g1), int(g2),
+                    float(self.part_32_33_attach_gap + 0.01), fromto))
+                if distance < nearest:
+                    nearest, pair = distance, (int(g1), int(g2))
+        return nearest, pair
+
+    def _auto_part_32_33_attach(self):
+        if not self.part_32_33_auto_attach_enabled or self.part_32_33_attachment:
+            return
+        # Allow attachment when either part is held. If BOTH are held by
+        # independent arms, defer until one releases to avoid conflicting
+        # kinematic drivers (two arms cannot both dictate a rigid assembly).
+        owner32 = self._object_owner(self.part_32)
+        owner33 = self._object_owner(self.part_33)
+        if owner32 and owner33:
+            self.part_32_33_contact_streak = 0
+            now = time.monotonic()
+            if now - self.part_32_33_last_report >= 2.0:
+                self.part_32_33_last_report = now
+                self.get_logger().info(
+                    f"Part 3-2/3-3 attach waiting: both held "
+                    f"(part_3_2={owner32}, part_3_3={owner33}); "
+                    f"release either gripper first")
+            return
+
+        self.part_32_33_check_count += 1
+        # Avoid doing mesh distance queries at every simulation step.
+        if self.part_32_33_check_count % 5:
+            return
+        try:
+            gap, pair = self._part_32_33_surface_distance()
+        except Exception as exc:
+            now = time.monotonic()
+            if now - self.part_32_33_last_report >= 2.0:
+                self.part_32_33_last_report = now
+                self.get_logger().error(f"Part 3-2/3-3 geometry distance query failed: {exc}")
+            return
+
+        touching = pair is not None and gap <= self.part_32_33_attach_gap
+        self.part_32_33_contact_streak = (
+            self.part_32_33_contact_streak + 1 if touching else 0)
+        now = time.monotonic()
+        if now - self.part_32_33_last_report >= 2.0:
+            self.part_32_33_last_report = now
+            gap_label = f"{gap:.5f} m" if np.isfinite(gap) else "no close geometry pairs"
+            self.get_logger().info(
+                f"Part 3-2/3-3 attach watch: min_surface_gap={gap_label}, "
+                f"threshold={self.part_32_33_attach_gap:.4f} m, "
+                f"consecutive={self.part_32_33_contact_streak}/"
+                f"{self.part_32_33_contact_steps}")
+        if self.part_32_33_contact_streak < self.part_32_33_contact_steps:
+            return
+
+        # The currently held part must be the parent. This ensures that
+        # subsequent arm movement drives the whole assembly, not vice versa.
+        parent = self.part_32 if owner32 else self.part_33
+        child = self.part_33 if parent is self.part_32 else self.part_32
+        parent_pos = self.data.xpos[parent["body"]].copy()
+        parent_R = self.data.xmat[parent["body"]].reshape(3, 3).copy()
+        child_pos = self.data.xpos[child["body"]].copy()
+        child_R = self.data.xmat[child["body"]].reshape(3, 3).copy()
+        self.part_32_33_attachment = {
+            "parent": parent["name"], "child": child["name"],
+            "rel_pos": parent_R.T @ (child_pos - parent_pos),
+            "rel_R": parent_R.T @ child_R,
+        }
+        self.get_logger().info(
+            f"AUTO ATTACH: {child['name']} rigidly attached to {parent['name']} "
+            f"(surface_gap={gap:.6f} m, geom_pair={pair}, "
+            f"held_by={owner32 or owner33 or 'none'})")
+
+    def _push_direction_cb(self, msg):
+        """Data: [arm_number(1/2), world_dx, world_dy, world_dz]."""
+        vals = list(msg.data)
+        if len(vals) != 4 or not all(np.isfinite(v) for v in vals):
+            self.get_logger().warn("Invalid /mujoco/push_direction payload")
+            return
+        arm = {1: "panda1", 2: "panda2"}.get(int(vals[0]))
+        vec = np.asarray(vals[1:], dtype=float)
+        norm = float(np.linalg.norm(vec))
+        if arm is None or norm < 1e-8:
+            self.get_logger().warn("Invalid push arm or zero direction")
+            return
+        with self.lock:
+            self.push_direction[arm] = vec / norm
+
+    def _push_pad_front_projection(self, pad, direction):
+        """World-axis support coordinate of an actual fingertip BOX geom."""
+        center = self.data.geom_xpos[pad]
+        R = self.data.geom_xmat[pad].reshape(3, 3)
+        half = self.model.geom_size[pad, :3]
+        return float(np.dot(center, direction) + np.sum(np.abs(R.T @ direction) * half))
+
+    def _push_status_cb(self, arm, request, response):
+        """Return first-contact TCP position in world frame, if latched."""
+        with self.lock:
+            contact = self.push_first_contact_tcp[arm]
+            response.success = True
+            if contact is None or self.push_object[arm] is None:
+                response.message = "waiting"
+            else:
+                response.message = json.dumps({
+                    "object": self.push_object[arm]["name"],
+                    "contact_tcp": [float(x) for x in contact],
+                })
+        return response
+
+    def _push_contact_cb(self, arm, request, response):
+        with self.lock:
+            if request.data:
+                if self.push_direction[arm] is None:
+                    response.success = False
+                    response.message = f"{arm}: no push direction received; update push.py"
+                    return response
+                if self.arm_grasps[arm] is not None:
+                    response.success = False
+                    response.message = f"{arm} already owns an object; release it before push"
+                    return response
+                self.push_active[arm] = True
+                self.push_object[arm] = None
+                self.push_search_interrupted[arm] = False
+                self.push_first_contact_tcp[arm] = None
+                self.push_contact_cycle = 0
+                self.push_previous_sample[arm] = self._push_sample(arm)
+                response.success = True
+                response.message = f"{arm} push contact monitoring enabled"
+            else:
+                self.push_active[arm] = False
+                obj = self.push_object[arm]
+                if obj is not None and self._object_owner(obj) == arm:
+                    self._release_current_object(arm)
+                self.push_object[arm] = None
+                self.push_search_interrupted[arm] = False
+                self.push_first_contact_tcp[arm] = None
+                self.push_previous_sample[arm] = None
+                response.success = True
+                response.message = f"{arm} push monitoring disabled; pushed object released"
+            self.get_logger().info(response.message)
+        return response
+
+    def _push_sample(self, arm):
+        """Record fingertip geometry and hand pose at a precise-query boundary."""
+        hand, left, right = self._grasp_hand_spec(arm)
+        pads = [int(g) for g in list(left) + list(right)]
+        return {
+            "hand_pos": self.data.xpos[hand].copy(),
+            "pads": {g: self.data.geom_xpos[g].copy() for g in pads},
+        }
+
+    def _push_pair_gap_at_fraction(self, pad, obj_geom, previous_center,
+                                   current_center, fraction, direction, front):
+        """Query signed geometry gap at an interpolated fingertip location.
+
+        The object is stationary before the first latch. We temporarily move
+        only the fingertip geom center, never the actual robot joints or body.
+        The geom rotation is unchanged during a straight push.
+        """
+        saved = self.data.geom_xpos[pad].copy()
+        try:
+            self.data.geom_xpos[pad] = (previous_center +
+                                        fraction * (current_center - previous_center))
+            fromto = np.zeros(6, dtype=float)
+            distance = float(mujoco.mj_geomDistance(
+                self.model, self.data, int(pad), int(obj_geom), 0.01, fromto))
+            # Keep the original front-face requirement at the interpolated pose.
+            shift = self.data.geom_xpos[pad] - current_center
+            interpolated_front = front + float(np.dot(shift, direction))
+            valid_front = (float(np.dot(fromto[:3], direction)) >=
+                           interpolated_front - self.push_front_tolerance and
+                           float(np.dot(fromto[3:], direction)) >=
+                           interpolated_front - self.push_front_tolerance)
+            return distance, valid_front
+        finally:
+            self.data.geom_xpos[pad] = saved
+
+    def _auto_push_contact(self):
+        """Every 5 cycles, find first contact by swept-pose binary search."""
+        if not any(self.push_active[a] and self.push_object[a] is None
+                   for a in ("panda1", "panda2")):
+            return
+        self.push_contact_cycle += 1
+        if self.push_contact_cycle % self.push_contact_check_interval:
+            return
+        for arm in ("panda1", "panda2"):
+            if not self.push_active[arm] or self.push_object[arm] is not None:
+                continue
+            if self.arm_grasps[arm] is not None:
+                continue
+            hand_id, left, right = self._grasp_hand_spec(arm)
+            pads = [int(g) for g in list(left) + list(right)]
+            direction = self.push_direction[arm]
+            current = self._push_sample(arm)
+            previous = self.push_previous_sample[arm]
+            self.push_previous_sample[arm] = current
+            if previous is None:
+                continue
+            displacement = current["hand_pos"] - previous["hand_pos"]
+            advance = float(np.dot(displacement, direction))
+            if advance < -1e-6:
+                continue  # never attach during a reverse movement
+            front = max(self._push_pad_front_projection(p, direction) for p in pads)
+            best = None
+            for obj in self.pick_objects:
+                if self._object_owner(obj) is not None:
+                    continue
+                if obj["name"] in self.hex_tip_attachments:
+                    continue
+                if (self.part_32_33_attachment is not None and
+                        obj["name"] == self.part_32_33_attachment["child"]):
+                    continue
+                for g in self._object_geom_ids(obj):
+                    g = int(g)
+                    for pad in pads:
+                        now_center = current["pads"][pad]
+                        old_center = previous["pads"][pad]
+                        sphere_gap = (float(np.linalg.norm(now_center - self.data.geom_xpos[g]))
+                                      - float(self.model.geom_rbound[pad])
+                                      - float(self.model.geom_rbound[g]))
+                        if sphere_gap > self.push_contact_gap:
+                            continue
+                        try:
+                            end_gap, end_front = self._push_pair_gap_at_fraction(
+                                pad, g, old_center, now_center, 1.0, direction, front)
+                            if end_gap > self.push_contact_gap or not end_front:
+                                continue
+                            start_gap, start_front = self._push_pair_gap_at_fraction(
+                                pad, g, old_center, now_center, 0.0, direction, front)
+                            if start_gap <= self.push_contact_gap and start_front:
+                                first_fraction = 0.0
+                            else:
+                                lo, hi = 0.0, 1.0
+                                # At most 14 extra distance queries for the
+                                # actual contact candidate, only once per push.
+                                for _ in range(14):
+                                    mid = (lo + hi) * 0.5
+                                    gap, is_front = self._push_pair_gap_at_fraction(
+                                        pad, g, old_center, now_center, mid, direction, front)
+                                    if gap <= self.push_contact_gap and is_front:
+                                        hi = mid
+                                    else:
+                                        lo = mid
+                                first_fraction = hi
+                        except Exception as exc:
+                            self.get_logger().error(f"Push swept contact query failed: {exc}")
+                            continue
+                        # Earliest contact along the motion, not deepest penetration.
+                        key = (first_fraction, obj["name"], pad, g)
+                        if best is None or key < best[0]:
+                            best = (key, obj, end_gap)
+            if best is None:
+                continue
+            (fraction, _, pad, g), obj, end_gap = best
+            # Compensate for the distance traveled AFTER first contact but
+            # BEFORE the current fifth-cycle detection. Without this correction
+            # the object would move too little and finish at a variable pose.
+            contact_hand_pos = (previous["hand_pos"] + fraction * displacement)
+            overshoot = max(0.0, float(np.dot(
+                current["hand_pos"] - contact_hand_pos, direction)))
+            correction = overshoot * direction
+            qpos = int(obj["qpos"])
+            self.data.qpos[qpos:qpos + 3] += correction
+            obj["last_pos"] = self.data.qpos[qpos:qpos + 3].copy()
+            mujoco.mj_forward(self.model, self.data)
+            hand_pos = self.data.xpos[hand_id].copy()
+            hand_R = self.data.xmat[hand_id].reshape(3, 3).copy()
+            obj_pos = self.data.xpos[obj["body"]].copy()
+            obj_R = self.data.xmat[obj["body"]].reshape(3, 3).copy()
+            self.arm_grasps[arm] = {
+                "object": obj,
+                "rel_pos": hand_R.T @ (obj_pos - hand_pos),
+                "rel_R": hand_R.T @ obj_R,
+                "offset": obj_pos - self._finger_center_for_robot(arm),
+            }
+            self._sync_legacy_grasp_state()
+            self.push_object[arm] = obj
+            # Recover the true TCP position at first contact, not at the
+            # delayed fifth-cycle detection. The TCP offset rotates with hand.
+            tcp_now = self._gripper_tcp_center(hand_id, left, right)
+            self.push_first_contact_tcp[arm] = (
+                tcp_now - (current["hand_pos"] - contact_hand_pos)
+            ).copy()
+            self.get_logger().info(
+                f"PUSH SWEPT CONTACT: {arm} -> {obj['name']}, "
+                f"first_fraction={fraction:.5f}, compensation={overshoot*1000:.3f} mm, "
+                f"end_surface_gap={end_gap:.6f} m, geom_pair=({pad}, {g})")
+
     def _update_pick_objects(self):
         """Update each independently held object from its own hand pose."""
         mujoco.mj_forward(self.model, self.data)
@@ -918,6 +1300,11 @@ class MujocoMoveItBridge(Node):
             held[id(grasp["object"])] = (hand_pos + hand_R @ grasp["rel_pos"],
                                          hand_R @ grasp["rel_R"])
         for obj in self.pick_objects:
+            if (self.part_32_33_attachment is not None and
+                    obj["name"] == self.part_32_33_attachment["child"]):
+                continue  # child driven by its rigidly attached parent below
+            if obj["name"] in self.hex_tip_attachments:
+                continue  # driven below by the hex_key pose
             qpos, qvel = obj["qpos"], obj["qvel"]
             if id(obj) in held:
                 pos, obj_R = held[id(obj)]
@@ -932,6 +1319,40 @@ class MujocoMoveItBridge(Node):
                 if obj["quat"] is not None:
                     self.data.qpos[qpos + 3:qpos + 7] = obj["quat"]
             self.data.qvel[qvel:qvel + 6] = 0.0
+
+        if self.part_32_33_attachment is not None:
+            mujoco.mj_forward(self.model, self.data)
+            rel = self.part_32_33_attachment
+            parent = self.part_32 if rel["parent"] == "part_3_2" else self.part_33
+            child = self.part_33 if rel["child"] == "part_3_3" else self.part_32
+            parent_pos = self.data.xpos[parent["body"]].copy()
+            parent_R = self.data.xmat[parent["body"]].reshape(3, 3).copy()
+            qpos, qvel = child["qpos"], child["qvel"]
+            pos = parent_pos + parent_R @ rel["rel_pos"]
+            quat = self._mat_to_mj_quat(parent_R @ rel["rel_R"])
+            self.data.qpos[qpos:qpos + 3] = pos
+            self.data.qpos[qpos + 3:qpos + 7] = quat
+            self.data.qvel[qvel:qvel + 6] = 0.0
+            child["last_pos"] = pos.copy()
+            child["quat"] = quat.copy()
+
+        # The hex key may itself be held by either Panda arm. Refresh its
+        # world transform after updating the freejoint, then drive attached
+        # objects with their original rigid offsets (also after release).
+        if self.hex_tip_attachments:
+            mujoco.mj_forward(self.model, self.data)
+            parent_pos = self.data.xpos[self.hex_key_body].copy()
+            parent_R = self.data.xmat[self.hex_key_body].reshape(3, 3).copy()
+            for attachment in self.hex_tip_attachments.values():
+                obj = attachment["object"]
+                qpos, qvel = obj["qpos"], obj["qvel"]
+                pos = parent_pos + parent_R @ attachment["rel_pos"]
+                quat = self._mat_to_mj_quat(parent_R @ attachment["rel_R"])
+                self.data.qpos[qpos:qpos + 3] = pos
+                self.data.qpos[qpos + 3:qpos + 7] = quat
+                self.data.qvel[qvel:qvel + 6] = 0.0
+                obj["last_pos"] = pos.copy()
+                obj["quat"] = quat.copy()
 
     def _screw_config_cb(self, msg):
         """
@@ -972,6 +1393,152 @@ class MujocoMoveItBridge(Node):
             f"down_distance={self.screw_down_distance:.4f}, "
             f"YAML target_tip={target_tip.tolist()}"
         )
+
+    def _hex_tip_nearest_candidate(self):
+        """Select nearest movable object by current geom position, screw-style.
+
+        Use each geom's conservative bounding radius as a broad proximity
+        estimate; unlike data.contact this also works without collision pairs.
+        All candidates are cached at startup, so no scene-tree scan per step.
+        """
+        tip = np.asarray(self.data.site_xpos[self.hex_key_tip_site], dtype=float)
+        best = None
+        for gid, obj in self.hex_candidate_by_geom.items():
+            if self._object_owner(obj) is not None:
+                continue
+            center = self.data.geom_xpos[gid]
+            center_distance = float(np.linalg.norm(center - tip))
+            # geom_rbound is MuJoCo's bounding-sphere radius.  It is a
+            # conservative surface estimate for non-spherical geometry.
+            bound = float(self.model.geom_rbound[gid])
+            surface_gap = max(0.0, center_distance - bound)
+            if surface_gap > self.hex_tip_contact_radius:
+                continue
+            key = (surface_gap, center_distance, obj["name"])
+            if best is None or key < best[0]:
+                best = (key, obj, gid)
+        return best
+
+    def _attach_hex_target(self, target, distance):
+        """Store the first attachment only; called under the simulation lock."""
+        if self.hex_tip_attachments or self.hex_tip_ever_attached:
+            return False
+        parent_R = self.data.xmat[self.hex_key_body].reshape(3, 3).copy()
+        parent_pos = self.data.xpos[self.hex_key_body].copy()
+        child_R = self.data.xmat[int(target["body"])].reshape(3, 3).copy()
+        child_pos = self.data.xpos[int(target["body"])].copy()
+        self.hex_tip_ever_attached = True
+        self.hex_tip_attachments[target["name"]] = {
+            "object": target,
+            "rel_pos": parent_R.T @ (child_pos - parent_pos),
+            "rel_R": parent_R.T @ child_R,
+        }
+        self.get_logger().info(
+            f"HEX TIP attached '{target['name']}' to hex_key "
+            f"(estimated geom surface gap={distance:.5f} m); single target locked"
+        )
+        return True
+
+    def _auto_hex_tip_attach(self):
+        """Low-cost periodic geometry proximity check, independent of contacts."""
+        if self.hex_tip_attachments or self.hex_tip_ever_attached:
+            return
+        holding_hex = any(
+            grasp is not None and grasp["object"] is self.hex_key_object
+            for grasp in self.arm_grasps.values()
+        )
+        if not holding_hex:
+            self.hex_tip_contact_streak = 0
+            self.hex_contact_check_counter = 0
+            self.hex_tip_candidate_name = None
+            return
+        self.hex_contact_check_counter += 1
+        if self.hex_contact_check_counter < self.hex_contact_check_interval:
+            return
+        self.hex_contact_check_counter = 0
+        match = self._hex_tip_nearest_candidate()
+        name = match[1]["name"] if match is not None else None
+        if name is not None and name == self.hex_tip_candidate_name:
+            self.hex_tip_contact_streak += 1
+        else:
+            self.hex_tip_candidate_name = name
+            self.hex_tip_contact_streak = 1 if name is not None else 0
+        if match is not None and self.hex_tip_contact_streak >= self.hex_tip_auto_contact_steps:
+            self._attach_hex_target(match[1], match[0][0])
+            self.hex_tip_contact_streak = 0
+
+    def _hex_tip_attach_cb(self, request, response):
+        """Optional legacy service: same geometry-based, single-target rule."""
+        with self.lock:
+            if self.hex_tip_attachments or self.hex_tip_ever_attached:
+                response.success = False
+                response.message = "hex_key attachment already used; second attachment prohibited"
+                return response
+            mujoco.mj_forward(self.model, self.data)
+            match = self._hex_tip_nearest_candidate()
+            if match is None:
+                response.success = False
+                response.message = (
+                    "No unheld freejoint object near hex_key_tip "
+                    f"(estimated surface gap <= {self.hex_tip_contact_radius:.3f} m)"
+                )
+                return response
+            response.success = self._attach_hex_target(match[1], match[0][0])
+            response.message = (f"Attached '{match[1]['name']}'" if response.success
+                                else "Already attached")
+            return response
+
+    def _hex_key_attached_axis_cb(self, request, response):
+        """Return the attached object's current WORLD center-of-mass XY.
+
+        A WORLD-Z-parallel rotation axis passes through this point.
+        This read-only service does not alter the attachment state.
+        """
+        with self.lock:
+            if not self.hex_tip_attachments:
+                response.success = False
+                response.message = "No object attached to hex_key_tip"
+                return response
+            attachment = next(iter(self.hex_tip_attachments.values()))
+            obj = attachment["object"]
+            body = int(obj["body"])
+            # The simulation loop maintains xipos; no expensive forward here.
+            center = self.data.xipos[body]
+            response.success = True
+            response.message = json.dumps({
+                "body": obj["name"],
+                "axis_x": float(center[0]),
+                "axis_y": float(center[1]),
+                "axis_z": float(center[2]),
+            })
+            return response
+
+    def _hex_tip_detach_cb(self, request, response):
+        """Release attached part at its current WORLD pose; keep one-shot latch."""
+        with self.lock:
+            if not self.hex_tip_attachments:
+                response.success = False
+                response.message = "No object attached to hex_key_tip"
+                return response
+            # _update_pick_objects stores last_pos/quat every simulation step;
+            # capture the exact current world pose before releasing the rigid link.
+            mujoco.mj_forward(self.model, self.data)
+            names = []
+            for name, attachment in self.hex_tip_attachments.items():
+                obj = attachment["object"]
+                body = int(obj["body"])
+                obj["last_pos"] = self.data.xpos[body].copy()
+                obj["quat"] = self._mat_to_mj_quat(
+                    self.data.xmat[body].reshape(3, 3).copy())
+                names.append(name)
+            self.hex_tip_attachments.clear()
+            self.hex_tip_ever_attached = True
+            self.hex_tip_contact_streak = 0
+            self.hex_tip_candidate_name = None
+            response.success = True
+            response.message = "Detached " + ", ".join(names) + "; auto reattach disabled"
+            self.get_logger().info(response.message)
+            return response
 
     def _screw_start_cb(self, request, response):
         with self.lock:
@@ -1429,6 +1996,9 @@ class MujocoMoveItBridge(Node):
                 self._update_pick_objects()
                 self._update_screw_motion()
                 mujoco.mj_forward(self.model, self.data)
+                self._auto_hex_tip_attach()
+                self._auto_part_32_33_attach()
+                self._auto_push_contact()
 
                 now = time.monotonic()
 
@@ -1850,7 +2420,14 @@ class MujocoMoveItBridge(Node):
             ts = np.array([p[1] for p in plan], dtype=float)
             qs = [p[0] for p in plan]
 
+            push_interrupted = False
             while True:
+                with self.lock:
+                    if (self.push_active["panda2"] and self.push_object["panda2"] is not None
+                            and not self.push_search_interrupted["panda2"]):
+                        self.push_search_interrupted["panda2"] = True
+                        push_interrupted = True
+                        break
                 t = time.monotonic() - start
                 if t >= ts[-1]:
                     break
@@ -1869,6 +2446,14 @@ class MujocoMoveItBridge(Node):
                     self.v_command[:] = v
                 time.sleep(1.0 / 250.0)
 
+            if push_interrupted:
+                with self.lock:
+                    self.q_command[:] = self.data.qpos[self.arm_qadr]
+                    self.v_command[:] = 0.0
+                    self.trajectory_active = False
+                response.success = True
+                response.message = "Panda2 continuous search interrupted at detected push contact"
+                return response
             with self.lock:
                 self.q_command[:] = qs[-1]
                 self.v_command[:] = 0.0
@@ -1947,8 +2532,9 @@ class MujocoMoveItBridge(Node):
                     seg += 1
                 dt = max(ts[seg+1]-ts[seg], 1e-6)
                 u = float(np.clip((t-ts[seg])/dt, 0.0, 1.0))
-                s = 3*u*u - 2*u*u*u
-                ds = (6*u - 6*u*u)/dt
+                s = u if isinstance(plan, _ContinuousOrbitPlan) else 3*u*u - 2*u*u*u
+                ds = (1.0/dt if isinstance(plan, _ContinuousOrbitPlan)
+                      else (6*u - 6*u*u)/dt)
                 q = (1-s)*qs[seg] + s*qs[seg+1]
                 v = ds*(qs[seg+1]-qs[seg])
                 with self.lock:
@@ -2051,6 +2637,74 @@ class MujocoMoveItBridge(Node):
         mujoco.mju_quat2Mat(Rflat, q)
         return Rflat.reshape(3, 3)
 
+    def _plan_continuous_orbit(self, arm, request, response):
+        """One dense Cartesian circular orbit -> one continuous joint trajectory.
+
+        Service encoding (PlanToPose, avoiding a new .srv build):
+          target.pose.position.x/y = WORLD orbit axis XY
+          target.pose.position.z   = signed rotation angle in RADIANS
+          velocity_scale/acceleration_scale = speed fractions
+        Start TCP pose and orientation are read from the actual MuJoCo robot.
+        """
+        try:
+            cx = float(request.target.pose.position.x)
+            cy = float(request.target.pose.position.y)
+            theta = float(request.target.pose.position.z)
+            speed = float(request.velocity_scale)
+            accel = float(request.acceleration_scale)
+            if not np.all(np.isfinite([cx, cy, theta, speed, accel])):
+                raise ValueError("Nonfinite orbit parameters")
+            if not (0.0 < speed <= 1.0 and 0.0 < accel <= 1.0):
+                raise ValueError("velocity/acceleration scales must be in (0,1]")
+            if abs(theta) > 2 * np.pi + 1e-8:
+                raise ValueError("Orbit angle exceeds 360 degrees")
+            if arm == "panda1":
+                adr, vadr = self.p1_arm_qadr, self.p1_arm_vadr
+                hand, lg, rg = self.p1_hand, self.p1_left_geoms, self.p1_right_geoms
+                solver, queue = self._p1_solve_ik, self.p1_plan_queue
+            else:
+                adr, vadr = self.arm_qadr, self.arm_vadr
+                hand, lg, rg = self.hand, self.left_geoms, self.right_geoms
+                solver, queue = self._p2_solve_ik, self.p2_plan_queue
+            with self.lock:
+                if queue:
+                    raise RuntimeError("Clear existing plan queue before orbit")
+                mujoco.mj_forward(self.model, self.data)
+                q0 = self.data.qpos[adr].copy()
+                p0 = self._gripper_tcp_center(hand, lg, rg).copy()
+                R0 = self.data.xmat[hand].reshape(3, 3).copy()
+            # Internal sampling is independent of YAML: 1 degree max per point.
+            steps = max(1, int(np.ceil(abs(theta) / np.deg2rad(1.0))))
+            dx, dy = p0[0] - cx, p0[1] - cy
+            qs = [q0.copy()]
+            q = q0.copy()
+            for i in range(1, steps + 1):
+                a = theta * i / steps
+                c, s = np.cos(a), np.sin(a)
+                target = np.array([cx + c * dx - s * dy,
+                                   cy + s * dx + c * dy, p0[2]])
+                Rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+                q = solver(target, Rz @ R0, q)
+                qs.append(q.copy())
+            # Conservative duration based on joint-space path length. Existing
+            # executor follows this entire plan in ONE call, no waypoint pauses.
+            path = np.asarray(qs)
+            joint_travel = float(np.max(np.sum(np.abs(np.diff(path, axis=0)), axis=0)))
+            duration = max(0.4, joint_travel / max(0.5 * speed, 0.01),
+                           0.4 / np.sqrt(accel))
+            plan = _ContinuousOrbitPlan(self._p1_make_traj(qs, duration))
+            with self.lock:
+                queue.append(plan)
+            response.success = True
+            response.message = (f"{arm} continuous orbit queued: {steps} IK samples, "
+                                f"duration={duration:.2f}s, TCP Z={p0[2]:.6f}")
+            self.get_logger().info(response.message)
+        except Exception as e:
+            response.success = False
+            response.message = str(e)
+            self.get_logger().error(f"{arm} orbit planning failed: {e}")
+        return response
+
     def _p1_make_traj(self, qs, duration):
         traj = []
         n = max(len(qs) - 1, 1)
@@ -2147,7 +2801,14 @@ class MujocoMoveItBridge(Node):
             seg = 0
             ts = np.array([p[1] for p in plan], dtype=float)
             qs = [p[0] for p in plan]
+            push_interrupted = False
             while True:
+                with self.lock:
+                    if (self.push_active["panda1"] and self.push_object["panda1"] is not None
+                            and not self.push_search_interrupted["panda1"]):
+                        self.push_search_interrupted["panda1"] = True
+                        push_interrupted = True
+                        break
                 t = time.monotonic() - start
                 if t >= ts[-1]:
                     break
@@ -2155,8 +2816,9 @@ class MujocoMoveItBridge(Node):
                     seg += 1
                 dt = max(ts[seg+1]-ts[seg], 1e-6)
                 u = float(np.clip((t-ts[seg])/dt, 0.0, 1.0))
-                s = 3*u*u - 2*u*u*u
-                ds = (6*u - 6*u*u)/dt
+                s = u if isinstance(plan, _ContinuousOrbitPlan) else 3*u*u - 2*u*u*u
+                ds = (1.0/dt if isinstance(plan, _ContinuousOrbitPlan)
+                      else (6*u - 6*u*u)/dt)
                 q = (1-s)*qs[seg] + s*qs[seg+1]
                 v = ds*(qs[seg+1]-qs[seg])
                 with self.lock:
@@ -2164,6 +2826,14 @@ class MujocoMoveItBridge(Node):
                     self.p1_v_command[:] = v
                 time.sleep(1.0/250.0)
 
+            if push_interrupted:
+                with self.lock:
+                    self.p1_q_command[:] = self.data.qpos[self.p1_arm_qadr]
+                    self.p1_v_command[:] = 0.0
+                    self.p1_trajectory_active = False
+                response.success = True
+                response.message = "Panda1 continuous search interrupted at detected push contact"
+                return response
             with self.lock:
                 self.p1_q_command[:] = qs[-1]
                 self.p1_v_command[:] = 0.0
@@ -2479,6 +3149,10 @@ class MujocoMoveItBridge(Node):
                 f"nearest object '{obj['name']}' is {distance:.4f} m away "
                 f"(limit {self.grasp_max_distance:.4f} m)")
 
+        if obj["name"] in self.hex_tip_attachments:
+            return obj, distance, (
+                f"'{obj['name']}' is already attached to hex_key"
+            )
         previous_owner = self._object_owner(obj)
         mujoco.mj_forward(self.model, self.data)
         hand_id, _, _ = self._grasp_hand_spec(robot)

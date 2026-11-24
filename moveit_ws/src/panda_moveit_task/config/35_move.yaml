@@ -1,0 +1,16 @@
+move_task:
+  ros__parameters:
+    arm: panda1             
+    move_x: -0.12000
+    move_y: 0.245000
+    move_z: 0.850000
+    move_rx_deg: 0.0
+    move_ry_deg: 0.0
+    move_rz_deg: -45.0
+    
+    planning_mode: "linear"
+    velocity_scale: 0.35
+    acceleration_scale: 0.25
+    
+    gripper_action: "none"
+    gripper_width: 0.020000

@@ -112,7 +112,14 @@ TASKS=(
     "return|27_return.yaml"
     "screw|28_screw.yaml"
     "pick_place|29_pick_place.yaml"
-    "return|30_return.yaml"
+    "pick_place|30_pick_place.yaml"
+    "pick_place|31_pick_place.yaml"
+    "return|32_return.yaml"
+    "move|33_move.yaml"
+    "rotate|34_rotate.yaml"
+    "move|35_move.yaml"
+    "move|36_move.yaml"
+    "return|37_return.yaml"
 )
 
 echo "============================================================"

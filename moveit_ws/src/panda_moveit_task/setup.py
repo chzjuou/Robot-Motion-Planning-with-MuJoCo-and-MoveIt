@@ -30,6 +30,8 @@ setup(
             'regrasp = panda_moveit_task.regrasp:main',
             'return = panda_moveit_task.return:main',
             'screw = panda_moveit_task.screw:main',
+            'rotate = panda_moveit_task.rotate:main',
+            'push = panda_moveit_task.push:main'
             # END AUTO TASKS
         ],
     },

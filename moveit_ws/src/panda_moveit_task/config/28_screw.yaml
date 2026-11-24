@@ -2,7 +2,7 @@ screw_task:
   ros__parameters:
     # Read screwdriver pickup origin/orientation and screwdriver_tip geometry
     # directly from this MuJoCo scene XML.
-    scene_xml: "mujoco_pj/wrs.xml"
+    scene_xml: "/home/yo/mujoco/mujoco_menagerie/franka_emika_panda/wrs.xml"
 
     # Select the robot MoveIt namespace: "panda1" or "panda2".
     # The bridge must expose /<robot>/plan_to_pose,
@@ -27,9 +27,9 @@ screw_task:
     # During screw-down, the screwdriver moves another down_distance along
     # approach_direction and the nearest screw follows synchronously.
     # ------------------------------------------------------------
-    screw_1_tip_x: 0.0473
+    screw_1_tip_x: 0.0472
     screw_1_tip_y: 0.0550
-    screw_1_tip_z: 0.8227
+    screw_1_tip_z: 0.8226
     screw_1_rx_deg: 0.0
     screw_1_approach_distance: 0.030
     screw_1_approach_direction: "-y"

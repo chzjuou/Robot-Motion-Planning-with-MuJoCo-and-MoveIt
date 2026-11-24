@@ -1,6 +1,6 @@
 # Task 1 — WRS Parts Assembly with MuJoCo and MoveIt
 
-Task 1 demonstrates robot motion planning and execution for WRS parts assembly using **ROS 2 Humble**, **MoveIt 2**, and **MuJoCo**. The task is divided into three subtasks: **L-shaped part assembly**, **motor assembly**, and **pulley assembly**.
+Task 1 demonstrates robot motion planning and execution for WRS parts assembly using **ROS 2 Humble**, **MoveIt 2**, and **MuJoCo**. The task is divided into three subtasks: **L-shaped part assembly**, **motor assembly**, and **pulley assembly**, including pin insertion and fixation underneath the pulley.
 
 ## 1. Environment and project structure
 
@@ -132,7 +132,7 @@ Run **one command at a time**. The individual subtasks may assume an appropriate
 
 ## 5. Robot motion primitives
 
-Task 1 is organized around five robot motion primitive types:
+Task 1 is organized around six robot motion primitive types:
 
 | Primitive | Purpose |
 |---|---|
@@ -141,13 +141,14 @@ Task 1 is organized around five robot motion primitive types:
 | `screw` | Perform screw-related manipulation or fastening actions |
 | `move` | Move the robot between target poses or intermediate configurations |
 | `return` | Return the robot to a designated pose or ready state |
+| `rotate` | Advance the tool, rotate continuously about the attached part’s center axis, detach the tool, and retreat |
 
 The implementations are provided in the `panda_moveit_task` ROS 2 package. The numbered YAML files in its `config/` directory provide parameters for individual task steps.
 
-## 6. Current status and known limitations
+## 6. Current status and validation
 
 - The workflow is divided into **L-shaped part**, **motor**, and **pulley** assembly stages, with both full-sequence and per-subtask launch scripts.
-- **Incomplete:** The pin insertion and fixation operations underneath the pulley still need further development and validation.
+- All three assembly stages are now implemented, including the newly added `rotate` motion primitive.
 - Successful workspace compilation does not guarantee successful physical/kinematic execution. Check the MuJoCo simulation, MoveIt planning output, and task logs when testing each stage.
 
 ---

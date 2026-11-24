@@ -23,6 +23,7 @@ class PickActionTask(Node):
         self.declare_parameter("grasp_z", 0.847)
         self.declare_parameter("grasp_rx_deg", 0.0)
         self.declare_parameter("grasp_ry_deg", 0.0)
+        self.declare_parameter("grasp_rz_deg", 0.0)
 
         # Pre-grasp approach: start above grasp and move straight down.
         self.declare_parameter("approach_distance", 0.05)
@@ -35,6 +36,7 @@ class PickActionTask(Node):
         self.declare_parameter("place_z", 0.85)
         self.declare_parameter("place_rx_deg", 0.0)
         self.declare_parameter("place_ry_deg", 0.0)
+        self.declare_parameter("place_rz_deg", 0.0)
 
         # Final place/insert direction: +y, -y, +z, -z.
         self.declare_parameter("place_direction", "-z")
@@ -89,6 +91,8 @@ class PickActionTask(Node):
         self.gripper_client = ActionClient(
             self, GripperCommand, ("/mujoco/panda1_gripper_command"
                                    if arm == "panda1" else "/mujoco/gripper_command"))
+        self.part_attach_client = self.create_client(
+            Trigger, "/mujoco/enable_part_3_2_3_3_attach")
         self.stop_client = self.create_client(
             Trigger, "/mujoco/wait_until_stopped")
 
@@ -129,13 +133,15 @@ class PickActionTask(Node):
             cls.quat_multiply(q, vq), cls.quat_conjugate(q)
         )[:3]
 
-    def rotated_orientation(self, base_q, rx_deg, ry_deg):
-        # Apply user rotations about WORLD X, then WORLD Y.
+    def rotated_orientation(self, base_q, rx_deg, ry_deg, rz_deg=0.0):
+        # Apply user rotations about WORLD X, then WORLD Y, then WORLD Z.
         rx = math.radians(float(rx_deg))
         ry = math.radians(float(ry_deg))
+        rz = math.radians(float(rz_deg))
         qx = [math.sin(rx/2.0), 0.0, 0.0, math.cos(rx/2.0)]
         qy = [0.0, math.sin(ry/2.0), 0.0, math.cos(ry/2.0)]
-        q_delta = self.quat_multiply(qy, qx)
+        qz = [0.0, 0.0, math.sin(rz/2.0), math.cos(rz/2.0)]
+        q_delta = self.quat_multiply(qz, self.quat_multiply(qy, qx))
         q = self.quat_multiply(q_delta, base_q)
         n = math.sqrt(sum(v*v for v in q))
         return [v/n for v in q]
@@ -453,8 +459,6 @@ class PickActionTask(Node):
 
         direction, axis, sign = self.get_place_direction()
         distance = abs(float(self.param("place_distance")))
-        if distance <= 0.0:
-            raise RuntimeError("place_distance must be > 0")
 
         # No YAML "above" pose. Derive the entrance automatically.
         place_start = place.copy()
@@ -491,10 +495,12 @@ class PickActionTask(Node):
 
         base_orientation = self.sequence_base_orientation
         grasp_orientation = self.rotated_orientation(
-            base_orientation, self.param("grasp_rx_deg"), self.param("grasp_ry_deg")
+            base_orientation, self.param("grasp_rx_deg"), self.param("grasp_ry_deg"),
+            self.param("grasp_rz_deg")
         )
         place_orientation = self.rotated_orientation(
-            base_orientation, self.param("place_rx_deg"), self.param("place_ry_deg")
+            base_orientation, self.param("place_rx_deg"), self.param("place_ry_deg"),
+            self.param("place_rz_deg")
         )
 
         self.get_logger().info(
@@ -505,16 +511,22 @@ class PickActionTask(Node):
         # approach is derived from grasp + approach_distance; YAML has no above pose.
         # Move to approach with OMPL, then approach grasp with a straight Cartesian segment.
         # Final place/insert motion is Cartesian along +/-Y or +/-Z.
-        segments = [
-            ("approach", False),
-            ("grasp", True),
-            ("lift", True),
-            ("place_start", False),
-            ("place", True),
-        ]
-
-        if bool(self.param("open_and_lift_after_place")):
-            segments.append(("retreat", True))
+        # A zero-length motion is omitted from BOTH the plan queue and execution.
+        # This keeps cached-plan execution aligned with the planned segments.
+        self.active_segments = ["approach"]
+        if abs(float(self.param("approach_distance"))) > 1e-9:
+            self.active_segments.append("grasp")
+        if abs(float(self.param("lift_height"))) > 1e-9:
+            self.active_segments.append("lift")
+        self.active_segments.append("place_start")
+        if abs(float(self.param("place_distance"))) > 1e-9:
+            self.active_segments.append("place")
+        if (bool(self.param("open_and_lift_after_place"))
+                and max(0.0, float(self.param("retreat_distance"))) > 1e-9):
+            self.active_segments.append("retreat")
+        segments = [(name, name in ("grasp", "lift", "place", "retreat"))
+                    for name in self.active_segments]
+        self.get_logger().info(f"Nonzero motion segments: {self.active_segments}")
 
         try:
             for name, linear in segments:
@@ -581,10 +593,13 @@ class PickActionTask(Node):
         time.sleep(0.3)
 
         self.execute_next_plan("2. Move to pre-grasp approach")
-        self.execute_next_plan(
-            f"3. Approach grasp straight down "
-            f"{abs(float(self.param('approach_distance'))):.4f} m"
-        )
+        if "grasp" in self.active_segments:
+            self.execute_next_plan(
+                f"3. Approach grasp straight down "
+                f"{abs(float(self.param('approach_distance'))):.4f} m"
+            )
+        else:
+            self.get_logger().info("3. Skip approach-to-grasp: approach_distance=0")
         time.sleep(0.3)
 
         self.get_logger().info(
@@ -593,16 +608,22 @@ class PickActionTask(Node):
         self.close_gripper_for_grasp()
         time.sleep(0.5)
 
-        self.execute_next_plan("5. Lift")
-        time.sleep(0.4)
+        if "lift" in self.active_segments:
+            self.execute_next_plan("5. Lift")
+            time.sleep(0.4)
+        else:
+            self.get_logger().info("5. Skip lift: lift_height=0")
 
         self.execute_next_plan("6. Transfer to derived place/insert start")
 
         direction, _, _ = self.get_place_direction()
         distance = abs(float(self.param("place_distance")))
-        self.execute_next_plan(
-            f"7. Place/insert along {direction.upper()} {distance:.4f} m"
-        )
+        if "place" in self.active_segments:
+            self.execute_next_plan(
+                f"7. Place/insert along {direction.upper()} {distance:.4f} m"
+            )
+        else:
+            self.get_logger().info("7. Skip place insertion: place_distance=0")
 
         if bool(self.param("open_and_lift_after_place")):
             self.wait_stopped()
@@ -613,9 +634,12 @@ class PickActionTask(Node):
             )
             self.release_gripper_after_place()
             time.sleep(0.5)
-            self.execute_next_plan(
-                f"9. Retreat opposite {direction.upper()}"
-            )
+            if "retreat" in self.active_segments:
+                self.execute_next_plan(
+                    f"9. Retreat opposite {direction.upper()}"
+                )
+            else:
+                self.get_logger().info("9. Skip retreat: retreat_distance=0")
         else:
             self.get_logger().info(
                 "open_and_lift_after_place=false: finish at final pose; "
@@ -623,6 +647,18 @@ class PickActionTask(Node):
             )
 
         self.get_logger().info("========================================")
+        # Arm task is complete: now permit contact-triggered part_3_2/part_3_3 attachment.
+        if self.part_attach_client.wait_for_service(timeout_sec=2.0):
+            f = self.part_attach_client.call_async(Trigger.Request())
+            rclpy.spin_until_future_complete(self, f)
+            result = f.result()
+            if result is None or not result.success:
+                self.get_logger().warn("Part contact attachment could not be enabled")
+            else:
+                self.get_logger().info(result.message)
+        else:
+            self.get_logger().warn("Part attachment service unavailable; update Bridge")
+
         self.get_logger().info("UNIFIED PICK ACTION FINISHED")
         self.get_logger().info("========================================")
 

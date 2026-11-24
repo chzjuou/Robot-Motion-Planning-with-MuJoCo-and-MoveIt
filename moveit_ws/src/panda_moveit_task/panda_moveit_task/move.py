@@ -24,6 +24,7 @@ class MoveTask(Node):
             'move_z': 0.95,
             'move_rx_deg': 0.0,
             'move_ry_deg': 0.0,
+            'move_rz_deg': 0.0,
             'planning_mode': 'ompl',  # ompl / linear / joint_relative
             'joint_index': 1,
             'joint_delta_deg': 0.0,
@@ -83,7 +84,7 @@ class MoveTask(Node):
         ]
 
     def target_orientation(self):
-        # Same reference and WORLD X -> WORLD Y rotation convention as pick_place.py.
+        # Same reference and WORLD X -> WORLD Y -> WORLD Z rotation convention as pick_place.py.
         # Do not overwrite or recapture bridge-start Q0.
         with open(self.orientation_reference_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -94,9 +95,11 @@ class MoveTask(Node):
         base = [v/n for v in base]
         rx = math.radians(float(self.p('move_rx_deg')))
         ry = math.radians(float(self.p('move_ry_deg')))
+        rz = math.radians(float(self.p('move_rz_deg')))
         qx = [math.sin(rx/2), 0.0, 0.0, math.cos(rx/2)]
         qy = [0.0, math.sin(ry/2), 0.0, math.cos(ry/2)]
-        q = self.quat_multiply(self.quat_multiply(qy, qx), base)
+        qz = [0.0, 0.0, math.sin(rz/2), math.cos(rz/2)]
+        q = self.quat_multiply(self.quat_multiply(qz, self.quat_multiply(qy, qx)), base)
         n = math.sqrt(sum(v*v for v in q))
         return [v/n for v in q]
 
@@ -194,7 +197,7 @@ class MoveTask(Node):
         if not rclpy.ok():
             raise RuntimeError('ROS shutdown before robot became ready')
 
-        # Absolute WORLD TCP orientation = Ry(move_ry_deg) * Rx(move_rx_deg) * Q0.
+        # Absolute WORLD TCP orientation = Rz(move_rz_deg) * Ry(move_ry_deg) * Rx(move_rx_deg) * Q0.
         # Angles are relative to the bridge-start orientation, NOT the current pose.
         q = self.target_orientation()
         def plan_pose(position, orientation, linear, label):
@@ -245,7 +248,7 @@ class MoveTask(Node):
         else:
             self.get_logger().info(f'{self.arm} OMPL/joint-space move to {target_pos}')
             plan_pose(target_pos, q, False, 'joint-space move')
-        self.get_logger().info(f'{self.arm} moved to requested world TCP pose with Q0-relative X/Y rotations')
+        self.get_logger().info(f'{self.arm} moved to requested world TCP pose with Q0-relative X/Y/Z rotations')
         if mode != 'none':
             self.command_gripper(mode)
 

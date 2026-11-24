@@ -32,7 +32,7 @@ pick_action_task:
     retreat_distance: 0.080000
 
     gripper_open_width: 0.020000
-    grasp_width: 0.007000
+    grasp_width: 0.006000
 
     open_and_lift_after_place: true
 
