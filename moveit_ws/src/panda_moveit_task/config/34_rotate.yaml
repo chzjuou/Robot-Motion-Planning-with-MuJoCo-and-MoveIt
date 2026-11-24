@@ -1,8 +1,0 @@
-rotate_task:
-  ros__parameters:
-    arm: panda1                  # panda1 / panda2
-    advance_direction: '+z'     # +x / -x / +y / -y / +z / -z
-    advance_distance: 0.0195     # m: advance then retreat same distance
-    rotate_angle_deg: -90.0      # deg: positive counterclockwise viewed from +Z
-    velocity_scale: 0.8
-    acceleration_scale: 0.7

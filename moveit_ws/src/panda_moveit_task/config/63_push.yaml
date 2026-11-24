@@ -1,0 +1,22 @@
+push_task:
+  ros__parameters:
+    arm: "panda1"                   # panda1 / panda2
+    
+    # Target TRUE-TCP world position (metres), reached before push starts.
+    target_x: -0.06500
+    target_y: 0.095000
+    target_z: 0.846500
+    
+    # World-axis XYZ Euler offsets in degrees relative to bridge-start GLOBAL Q0.
+    target_rx_deg: -30.0
+    target_ry_deg: 0.0
+    target_rz_deg: 0.0
+    push_direction: "-y"           # +x, -x, +y, -y, +z, -z (WORLD axes)
+    push_distance: 0.0291          # metres; 0 = only approach
+    contact_search_max_distance: 0.2
+
+    gripper_width: 0.0120
+    retreat_distance: 0.1000
+    
+    velocity_scale: 0.20
+    acceleration_scale: 0.20
