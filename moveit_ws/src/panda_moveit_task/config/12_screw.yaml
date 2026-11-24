@@ -1,9 +1,5 @@
 screw_task:
   ros__parameters:
-    # Read screwdriver pickup origin/orientation and screwdriver_tip geometry
-    # directly from this MuJoCo scene XML.
-    scene_xml: "/home/yo/mujoco/mujoco_menagerie/franka_emika_panda/wrs.xml"
-
     # Select the robot MoveIt namespace: "panda1" or "panda2".
     # The bridge must expose /<robot>/plan_to_pose,
     # /<robot>/execute_next_plan and /<robot>/clear_plan_queue.
