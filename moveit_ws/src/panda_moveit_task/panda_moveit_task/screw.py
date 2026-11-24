@@ -16,6 +16,18 @@ from std_srvs.srv import Trigger
 from panda_moveit_planner.srv import PlanToPose
 
 
+def resolve_scene_xml():
+    """Locate the WRS scene in the repository, independent of the working directory."""
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "mujoco_pj" / "wrs.xml"
+        if (parent / "moveit_ws").is_dir() and candidate.is_file():
+            return candidate.resolve()
+    raise FileNotFoundError(
+        "Cannot locate mujoco_pj/wrs.xml. Keep mujoco_pj and moveit_ws "
+        "in the same repository directory."
+    )
+
+
 class ScrewTask(Node):
     """
     Pick the screwdriver from its pose in scene_xml, keep it grasped, execute
@@ -38,7 +50,8 @@ class ScrewTask(Node):
     def __init__(self):
         super().__init__("screw_task")
 
-        self.declare_parameter("scene_xml", "wrs.xml")
+        # Retained for compatibility with existing YAML; the repository scene is used.
+        self.declare_parameter("scene_xml", "mujoco_pj/wrs.xml")
         # Select MoveIt service namespace: panda1 or panda2.
         self.declare_parameter("robot", "panda1")
         self.declare_parameter("screw_count", 1)
@@ -402,9 +415,8 @@ class ScrewTask(Node):
         self.execute_next_plan(name)
 
     def parse_screwdriver_from_xml(self):
-        path = Path(str(self.param("scene_xml")))
-        if not path.exists():
-            raise RuntimeError(f"scene_xml not found: {path}")
+        path = resolve_scene_xml()
+        self.get_logger().info(f"Using repository scene XML: {path}")
 
         root = ET.parse(path).getroot()
         body = root.find(".//body[@name='screwdriver']")
